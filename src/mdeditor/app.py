@@ -369,6 +369,9 @@ class MainWindow(QMainWindow):
         act(f, "모두 저장", self.save_all, "Ctrl+Alt+S")
         f.addSeparator()
         act(f, "목록에서 닫기(체크한 파일 모두)", self.close_current, "Ctrl+W")
+        self.close_checked_action = QAction("선택닫기", self)
+        self.close_checked_action.setToolTip("목록에서 체크한 파일을 모두 닫습니다(저장 안 된 파일은 물어봄)")
+        self.close_checked_action.triggered.connect(self.close_checked)
         f.addSeparator()
         a_print = act(f, "체크한 파일 인쇄...", self.print_checked, QKeySequence.StandardKey.Print)
         a_pdf = act(f, "체크한 파일 PDF로 저장...", self.save_pdf, "Ctrl+Shift+P")
@@ -401,6 +404,7 @@ class MainWindow(QMainWindow):
             (a_new, "새 파일"),
             (a_open, "파일 올리기"),
             (self.select_all_action, "모두선택"),
+            (self.close_checked_action, "선택닫기"),
             (a_save, "저장"),
             (None, None),
             (a_print, "인쇄"),
@@ -733,8 +737,15 @@ class MainWindow(QMainWindow):
         self.docs.remove(doc)
         self._sync_select_all()
 
+    def close_checked(self) -> None:
+        """[선택닫기] 버튼: 체크한 파일만 닫는다. 체크한 것이 없으면 아무것도 닫지 않고 알려 준다."""
+        if not any(self.files.item(i).checkState() == Qt.CheckState.Checked for i in range(self.files.count())):
+            self.statusBar().showMessage("닫을 파일을 목록에서 체크하세요.", 4000)
+            return
+        self.close_current()
+
     def close_current(self) -> None:
-        """목록에서 닫기: 체크한 파일을 모두 닫는다. 체크한 것이 없으면 지금 보는 파일만."""
+        """목록에서 닫기(Ctrl+W): 체크한 파일을 모두 닫는다. 체크한 것이 없으면 지금 보는 파일만."""
         targets = [
             self.files.item(i).data(Qt.ItemDataRole.UserRole)
             for i in range(self.files.count())
