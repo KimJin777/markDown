@@ -1,8 +1,17 @@
 # 변경 이력
 
-버전은 `pyproject.toml`의 `version`이 정본이고, 창 제목에 `markDown vX.Y.Z`로 보인다.
+버전은 `pyproject.toml`의 `version`이 정본이고, 창 제목에 `mdEditor vX.Y.Z`로 보인다.
 올릴 때마다 이 파일에 적고 git 태그 `vX.Y.Z`를 단다.
 - 기능 추가 → 가운데 숫자(0.2.0 → 0.3.0), 결함 수정만 → 끝 숫자(0.2.0 → 0.2.1)
+
+## v0.3.0 — 2026-10-03
+
+- 목차(뷰어 왼쪽): 제목(#)으로 목록을 만들고 누르면 그 절로 이동, 지금 보는 절 표시. 켬/끔(서식 줄 `목차`, Ctrl+Shift+T, 보기 메뉴), 상태 기억
+- 소스 켬/끔(서식 줄 `소스`, Ctrl+Shift+E, 보기 메뉴): 끄면 원본 창을 숨기고 뷰어만 봄. 숨긴 상태에서도 서식 버튼은 뷰어 선택에 적용, 다시 켜면 원래 폭으로
+- 위쪽 도구 줄 `저장` 앞에 [모두선택] 토글(Ctrl+Shift+A): 누를 때마다 목록 전체 체크 ↔ 전체 해제, 모두 체크돼 있으면 눌린 모양
+- 실행 명령 이름 `mdEditor`(창 제목도 mdEditor). uv로 설치: `uv tool install git+https://github.com/KimJin777/markDown` (README)
+- 처음 실행할 때 바탕화면에 `mdEditor` 바로가기를 자동으로 만듦(한 번만, 메뉴 파일 → 바탕화면에 바로가기 만들기로 다시 만들기). 개발용(.venv) 실행에서는 만들지 않음
+- 실행 파일: `build.bat` → `dist\mdEditor\mdEditor.exe`(PyInstaller, 폴더째 배포, 파이썬 설치 불필요)
 
 ## v0.2.0 — 2026-10-03
 

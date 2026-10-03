@@ -11,7 +11,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QMarginsF, QPoint, QSettings, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QMarginsF, QPoint, QSettings, QStandardPaths, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
 
 from mdeditor import __version__
 from mdeditor.fmt import locate_in_source, py_to_q, q_to_py, set_heading, set_size, toggle_wrap
+from mdeditor import shortcut
 from mdeditor.render import page, print_document, render_body
 
 MD_SUFFIXES = {".md", ".markdown", ".mdown", ".txt"}
@@ -53,12 +54,53 @@ MD_FILTER = "마크다운 (*.md *.markdown *.mdown *.txt);;모든 파일 (*)"
 
 # 뷰어 껍데기 페이지: 본문만 갈아 끼워 깜박임·스크롤 튐을 막는다
 PREVIEW_JS = """
+<style>
+#toc { display: none; position: fixed; top: 0; left: 0; bottom: 0; width: 240px; overflow-y: auto;
+       padding: 14px 10px 30px 14px; box-sizing: border-box; background: #f6f8fa; border-right: 4px solid #d0d7de;
+       font-size: 14px; line-height: 1.45; }
+#toc .toc-title { font-weight: 600; color: #59636e; font-size: 12px; margin-bottom: 8px; }
+#toc a { display: block; color: #0969da; padding: 4px 4px; border-radius: 4px; text-decoration: none; cursor: pointer; }
+#toc a:hover { background: #e7ecf0; }
+#toc a.on { background: #ddf4ff; font-weight: 600; }
+#toc .lv1 { font-weight: 600; } #toc .lv2 { padding-left: 14px; } #toc .lv3 { padding-left: 28px; }
+#toc .lv4, #toc .lv5, #toc .lv6 { padding-left: 42px; font-size: 13px; }
+#toc .empty { color: #8c959f; }
+body.toc-on #toc { display: block; }
+body.toc-on #content { margin-left: 250px; }
+</style>
+<nav id="toc"></nav>
 <script>
 let quietUntil = 0;  // 프로그램이 움직인 스크롤은 편집기로 되돌려 보내지 않는다(서로 밀고 당기기 방지)
 const hush = () => { quietUntil = Date.now() + 200; };
 const blocks = () => Array.from(document.querySelectorAll('#content [data-line]'))
   .map(el => ({ n: +el.dataset.line, y: el.getBoundingClientRect().top + window.scrollY }));
-function setContent(html) { hush(); document.getElementById('content').innerHTML = html; }
+function setContent(html) { hush(); document.getElementById('content').innerHTML = html; buildToc(); }
+// 목차: 본문 제목(h1~h6)으로 왼쪽 목록을 만들고, 누르면 그 제목으로 이동(동시보기면 원본도 따라감)
+let heads = [];
+function buildToc() {
+  heads = Array.from(document.querySelectorAll('#content h1, #content h2, #content h3, #content h4, #content h5, #content h6'));
+  const toc = document.getElementById('toc');
+  const top = Math.min(...heads.map(h => +h.tagName[1]), 6);
+  toc.innerHTML = '<div class="toc-title">목차</div>' + (heads.length ? '' : '<div class="empty">제목(#)이 없습니다</div>');
+  heads.forEach(h => {
+    const a = document.createElement('a');
+    a.className = 'lv' + (+h.tagName[1] - top + 1);
+    a.textContent = h.textContent;
+    a.title = h.textContent;
+    a.onclick = () => window.scrollTo(0, h.getBoundingClientRect().top + window.scrollY - 8);
+    toc.appendChild(a);
+  });
+  markToc();
+}
+function markToc() {  // 지금 보고 있는 절을 목차에서 표시
+  const links = document.querySelectorAll('#toc a');
+  let cur = -1;
+  heads.forEach((h, i) => { if (h.getBoundingClientRect().top <= 40) cur = i; });
+  links.forEach((a, i) => a.classList.toggle('on', i === cur));
+  if (cur >= 0 && document.body.classList.contains('toc-on')) links[cur].scrollIntoView({ block: 'nearest' });
+}
+function setToc(on) { document.body.classList.toggle('toc-on', on); }
+window.addEventListener('scroll', markToc);
 function scrollToLine(line, atEnd) {
   hush();
   if (atEnd) { window.scrollTo(0, document.body.scrollHeight); return; }
@@ -254,6 +296,20 @@ class MainWindow(QMainWindow):
         self.sync_action.setChecked(self.settings.value("syncScroll", True, type=bool))
         self.sync_action.toggled.connect(self._on_sync_toggled)
 
+        # 목차: 뷰어 왼쪽에 제목 목록(누르면 그 절로 이동)
+        self.toc_action = QAction("목차", self, checkable=True)
+        self.toc_action.setToolTip("뷰어 왼쪽에 목차를 보이거나 숨깁니다 (Ctrl+Shift+T)")
+        self.toc_action.setShortcut("Ctrl+Shift+T")
+        self.toc_action.setChecked(self.settings.value("toc", True, type=bool))
+        self.toc_action.toggled.connect(self._on_toc_toggled)
+
+        # 소스: 끄면 원본 편집기를 숨기고 뷰어만 본다
+        self.source_action = QAction("소스", self, checkable=True)
+        self.source_action.setToolTip("원본(소스) 창을 보이거나 숨깁니다 — 끄면 뷰어만 보입니다 (Ctrl+Shift+E)")
+        self.source_action.setShortcut("Ctrl+Shift+E")
+        self.source_action.setChecked(self.settings.value("showSource", True, type=bool))
+        self.source_action.toggled.connect(self._on_source_toggled)
+
         self.files = FileList()
         self.editor = Editor()
         self.preview = QWebEngineView()
@@ -290,6 +346,7 @@ class MainWindow(QMainWindow):
         self._build_status()
         self.preview.setHtml(page("<div id='content'></div>", script=PREVIEW_JS), QUrl.fromLocalFile(str(Path.home()) + "/"))
         self._restore()
+        self.editor.setVisible(self.source_action.isChecked())  # 소스 켬/끔 상태 복원
         self.new_file()
 
     # ---------- 메뉴 ----------
@@ -316,13 +373,24 @@ class MainWindow(QMainWindow):
         a_print = act(f, "체크한 파일 인쇄...", self.print_checked, QKeySequence.StandardKey.Print)
         a_pdf = act(f, "체크한 파일 PDF로 저장...", self.save_pdf, "Ctrl+Shift+P")
         f.addSeparator()
+        act(f, "바탕화면에 바로가기 만들기", lambda: self.make_shortcut())
+        f.addSeparator()
         act(f, "끝내기", self.close, "Ctrl+Q")
 
         v = self.menuBar().addMenu("보기(&V)")
+        v.addAction(self.source_action)
+        v.addAction(self.toc_action)
         v.addAction(self.sync_action)
 
+        # 모두선택: 누를 때마다 목록 전체 체크 ↔ 전체 해제(토글). 버튼은 '모두 체크됨'일 때 눌린 모양
+        self.select_all_action = QAction("모두선택", self, checkable=True)
+        self.select_all_action.setShortcut("Ctrl+Shift+A")
+        self.select_all_action.setToolTip("목록의 파일을 모두 체크하거나, 모두 체크돼 있으면 모두 해제합니다 (Ctrl+Shift+A)")
+        self.select_all_action.triggered.connect(self._toggle_check_all)
+        self.files.itemChanged.connect(lambda _item: self._sync_select_all())
+
         s = self.menuBar().addMenu("선택(&S)")
-        act(s, "모두 체크", lambda: self._check_all(True), "Ctrl+Shift+A")
+        s.addAction(self.select_all_action)
         act(s, "모두 체크 해제", lambda: self._check_all(False))
 
         bar = self.addToolBar("도구")
@@ -332,6 +400,7 @@ class MainWindow(QMainWindow):
         for a, label in (
             (a_new, "새 파일"),
             (a_open, "파일 올리기"),
+            (self.select_all_action, "모두선택"),
             (a_save, "저장"),
             (None, None),
             (a_print, "인쇄"),
@@ -384,6 +453,8 @@ class MainWindow(QMainWindow):
         fmt_action("밑줄", "밑줄", "<u>", "</u>", "Ctrl+U", under=True)
         fmt_action("취소선", "취소선", "~~", None, None, strike=True)
         bar.addSeparator()
+        bar.addAction(self.source_action)
+        bar.addAction(self.toc_action)
         bar.addAction(self.sync_action)
         return bar
 
@@ -458,7 +529,7 @@ class MainWindow(QMainWindow):
             item.setText(("● " if doc.dirty else "") + doc.name)
             item.setToolTip(str(doc.path) if doc.path else "저장하지 않은 새 문서")
         if doc is self.current:
-            self.setWindowTitle(f"{doc.name}{' *' if doc.dirty else ''} — markDown v{__version__}")
+            self.setWindowTitle(f"{doc.name}{' *' if doc.dirty else ''} — mdEditor v{__version__}")
 
     def _add_doc(self, doc: Doc) -> None:
         doc.qdoc.setParent(self)  # 목록에서 닫아도 편집기가 잠시 쥐고 있을 수 있어 창이 소유
@@ -523,6 +594,20 @@ class MainWindow(QMainWindow):
         state = Qt.CheckState.Checked if on else Qt.CheckState.Unchecked
         for i in range(self.files.count()):
             self.files.item(i).setCheckState(state)
+        self._sync_select_all()
+
+    def _all_checked(self) -> bool:
+        n = self.files.count()
+        return n > 0 and all(self.files.item(i).checkState() == Qt.CheckState.Checked for i in range(n))
+
+    def _toggle_check_all(self) -> None:
+        on = not self._all_checked()
+        self._check_all(on)
+        self.statusBar().showMessage(f"{self.files.count()}개 파일을 모두 체크했습니다." if on else "체크를 모두 풀었습니다.", 3000)
+
+    def _sync_select_all(self) -> None:
+        """하나씩 체크를 바꿔도 버튼 모양이 실제 상태(모두 체크됨 여부)를 따라가게."""
+        self.select_all_action.setChecked(self._all_checked())
 
     # ---------- 열기 ----------
     def new_file(self) -> None:
@@ -646,6 +731,7 @@ class MainWindow(QMainWindow):
         if item:
             self.files.takeItem(self.files.row(item))
         self.docs.remove(doc)
+        self._sync_select_all()
 
     def close_current(self) -> None:
         """목록에서 닫기: 체크한 파일을 모두 닫는다. 체크한 것이 없으면 지금 보는 파일만."""
@@ -678,7 +764,34 @@ class MainWindow(QMainWindow):
     # ---------- 뷰어 ----------
     def _on_preview_loaded(self, ok: bool) -> None:
         self._preview_ready = ok
+        self._on_toc_toggled(self.toc_action.isChecked(), save=False)
         self.render_preview()
+
+    def _on_source_toggled(self, on: bool) -> None:
+        self.settings.setValue("showSource", on)
+        if not on:
+            sizes = self.splitter.sizes()
+            if sizes[1] > 0:
+                self._sizes_with_source = sizes  # 다시 켤 때 폭을 되돌리려고 기억
+            self.editor.setVisible(False)
+            self._last_pane = "preview"  # 원본이 숨으면 서식 버튼은 뷰어 선택을 쓴다
+            self.preview.setFocus()
+        else:
+            self.editor.setVisible(True)
+            sizes = getattr(self, "_sizes_with_source", None)
+            if not sizes:  # 기억이 없으면 원본·뷰어 반반
+                total = sum(self.splitter.sizes())
+                left = self.splitter.sizes()[0]
+                sizes = [left, (total - left) // 2, (total - left) // 2]
+            self.splitter.setSizes(sizes)
+            self.sync_scroll()
+        self.statusBar().showMessage("소스 켬" if on else "소스 끔 — 뷰어만 봅니다 (다시 켜려면 '소스' 버튼)", 3000)
+
+    def _on_toc_toggled(self, on: bool, save: bool = True) -> None:
+        if save:
+            self.settings.setValue("toc", on)
+        if self._preview_ready:
+            self.preview_page.runJavaScript(f"setToc({'true' if on else 'false'});")
 
     def _on_text_changed(self) -> None:
         self.render_timer.start()
@@ -885,15 +998,39 @@ class MainWindow(QMainWindow):
         if s := self.settings.value("splitter"):
             self.splitter.restoreState(s)
 
+    # ---------- 바탕화면 바로가기 ----------
+    def make_shortcut(self, first_run: bool = False) -> None:
+        """처음 실행할 때 한 번 자동으로, 또는 메뉴에서 직접 바탕화면에 mdEditor 바로가기를 만든다."""
+        if first_run and self.settings.value("shortcutDone", False, type=bool):
+            return
+        target = shortcut.launcher_path()
+        if target is None:  # 개발용 실행(.venv)이면 만들지 않는다
+            if not first_run:
+                QMessageBox.information(self, "바로가기", "개발용 실행에서는 바로가기를 만들지 않습니다.\n설치한 mdEditor(또는 실행 파일)로 실행해 주세요.")
+            return
+        desktop = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DesktopLocation))
+        if first_run and (desktop / shortcut.SHORTCUT_NAME).exists():
+            self.settings.setValue("shortcutDone", True)
+            return
+        try:
+            lnk = shortcut.create(desktop, target)
+        except Exception as e:  # noqa: BLE001 — 바로가기 실패로 프로그램이 멈추면 안 된다
+            self.settings.setValue("shortcutDone", True)  # 매번 다시 시도하지 않는다(메뉴로 다시 만들 수 있음)
+            self.statusBar().showMessage(f"바탕화면 바로가기를 만들지 못했습니다: {e}", 8000)
+            return
+        self.settings.setValue("shortcutDone", True)
+        self.statusBar().showMessage(f"바탕화면에 바로가기를 만들었습니다: {lnk}", 8000)
+
 
 def main() -> None:
     app = QApplication(sys.argv)
-    app.setApplicationName("markDown")
+    app.setApplicationName("mdEditor")
     app.setApplicationVersion(__version__)
     win = MainWindow()
     win.show()
     if len(sys.argv) > 1:  # 탐색기에서 파일을 끌어다 실행 파일에 놓은 경우
         win.open_paths(sys.argv[1:])
+    QTimer.singleShot(1500, lambda: win.make_shortcut(first_run=True))  # 창이 뜬 뒤에
     sys.exit(app.exec())
 
 

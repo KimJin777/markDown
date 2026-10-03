@@ -1,6 +1,6 @@
 [project]
 name = "markdown-editor"
-version = "0.2.0"
+version = "0.3.0"
 description = "파일 탐색기·편집기·뷰어 세 칸 마크다운 편집기"
 requires-python = ">=3.12,<3.14"
 dependencies = [
@@ -11,10 +11,10 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "pyinstaller>=6.10"]
 
 [project.gui-scripts]
-mdeditor = "mdeditor.app:main"
+mdEditor = "mdeditor.app:main"
 
 [build-system]
 requires = ["hatchling"]
