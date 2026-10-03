@@ -1,4 +1,5 @@
 @echo off
 cd /d "%~dp0"
-if not exist ".venv\Scripts\mdeditor.exe" uv sync
+rem 버전이 바뀌었으면 다시 설치(최신이면 바로 넘어감)
+uv sync -q
 start "" ".venv\Scripts\mdeditor.exe" %*
