@@ -14,7 +14,7 @@ $s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:MD_LNK)
 $s.TargetPath = $env:MD_TARGET
 $s.WorkingDirectory = $env:MD_WORKDIR
 $s.Description = 'mdEditor — 마크다운 편집기'
-$s.IconLocation = $env:MD_TARGET + ',0'
+$s.IconLocation = $env:MD_ICON + ',0'
 $s.Save()
 """
 
@@ -32,10 +32,17 @@ def launcher_path() -> Path | None:
     return None
 
 
-def create(desktop: Path, target: Path) -> Path:
-    """desktop에 바로가기를 만들고 그 경로를 돌려준다. 실패하면 예외."""
+def create(desktop: Path, target: Path, icon: Path | None = None) -> Path:
+    """desktop에 바로가기를 만들고 그 경로를 돌려준다(이미 있으면 새로 덮어씀). 실패하면 예외.
+    icon이 없으면 실행 파일의 아이콘을 쓴다."""
     lnk = desktop / SHORTCUT_NAME
-    env = {**os.environ, "MD_LNK": str(lnk), "MD_TARGET": str(target), "MD_WORKDIR": str(Path.home())}
+    env = {
+        **os.environ,
+        "MD_LNK": str(lnk),
+        "MD_TARGET": str(target),
+        "MD_ICON": str(icon or target),
+        "MD_WORKDIR": str(Path.home()),
+    }
     subprocess.run(
         ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", _PS],
         env=env,

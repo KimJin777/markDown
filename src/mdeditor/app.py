@@ -11,12 +11,14 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QMarginsF, QPoint, QSettings, QStandardPaths, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QFileSystemWatcher, QMarginsF, QPoint, QSettings, QStandardPaths, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
+    QActionGroup,
     QCloseEvent,
     QDesktopServices,
     QFont,
+    QIcon,
     QKeySequence,
     QPageLayout,
     QPageSize,
@@ -24,7 +26,7 @@ from PySide6.QtGui import (
     QTextDocument,
 )
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
-from PySide6.QtWebEngineCore import QWebEnginePage
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication,
@@ -38,6 +40,7 @@ from PySide6.QtWidgets import (
     QPlainTextDocumentLayout,
     QPlainTextEdit,
     QSplitter,
+    QStackedWidget,
     QToolBar,
     QToolButton,
     QVBoxLayout,
@@ -47,10 +50,15 @@ from PySide6.QtWidgets import (
 from mdeditor import __version__
 from mdeditor.fmt import locate_in_source, py_to_q, q_to_py, set_heading, set_size, toggle_wrap
 from mdeditor import shortcut
-from mdeditor.render import page, print_document, render_body
+from mdeditor.render import kind_of, page, print_document, render_any
 
-MD_SUFFIXES = {".md", ".markdown", ".mdown", ".txt"}
-MD_FILTER = "마크다운 (*.md *.markdown *.mdown *.txt);;모든 파일 (*)"
+MD_SUFFIXES = {".md", ".markdown", ".mdown", ".txt", ".json", ".yaml", ".yml", ".pdf"}
+MD_FILTER = "읽을 수 있는 파일 (*.md *.markdown *.mdown *.txt *.json *.yaml *.yml *.pdf);;마크다운 (*.md *.markdown *.mdown);;텍스트 (*.txt);;JSON (*.json);;YAML (*.yaml *.yml);;PDF (*.pdf);;모든 파일 (*)"
+SAVE_FILTER = "마크다운 (*.md *.markdown *.mdown);;텍스트 (*.txt);;JSON (*.json);;YAML (*.yaml *.yml);;모든 파일 (*)"
+ICON = Path(__file__).with_name("icon.ico")
+
+# 파일 목록 정렬: (설정값, 메뉴 글자)
+SORT_MODES = [("added", "올린 순서"), ("name", "이름"), ("kind", "종류(확장자)"), ("folder", "폴더(경로)"), ("mtime", "고친 시각(최근 먼저)")]
 
 # 뷰어 껍데기 페이지: 본문만 갈아 끼워 깜박임·스크롤 튐을 막는다
 PREVIEW_JS = """
@@ -74,7 +82,8 @@ let quietUntil = 0;  // 프로그램이 움직인 스크롤은 편집기로 되�
 const hush = () => { quietUntil = Date.now() + 200; };
 const blocks = () => Array.from(document.querySelectorAll('#content [data-line]'))
   .map(el => ({ n: +el.dataset.line, y: el.getBoundingClientRect().top + window.scrollY }));
-function setContent(html) { hush(); document.getElementById('content').innerHTML = html; buildToc(); }
+let totalLines = 1;  // 원본 줄 수(줄 표시가 없는 보기에서 비율 스크롤에 씀)
+function setContent(html, lines) { hush(); totalLines = lines || 1; document.getElementById('content').innerHTML = html; buildToc(); }
 // 목차: 본문 제목(h1~h6)으로 왼쪽 목록을 만들고, 누르면 그 제목으로 이동(동시보기면 원본도 따라감)
 let heads = [];
 function buildToc() {
@@ -105,7 +114,12 @@ function scrollToLine(line, atEnd) {
   hush();
   if (atEnd) { window.scrollTo(0, document.body.scrollHeight); return; }
   const bs = blocks();
-  if (!bs.length || line <= 0) { window.scrollTo(0, 0); return; }
+  if (!bs.length) {  // JSON·YAML처럼 줄 표시가 없는 보기: 문서 길이 비율로 맞춘다
+    const room = document.body.scrollHeight - window.innerHeight;
+    window.scrollTo(0, totalLines > 1 ? room * line / (totalLines - 1) : 0);
+    return;
+  }
+  if (line <= 0) { window.scrollTo(0, 0); return; }
   let prev = null, next = null;
   for (const b of bs) { if (b.n <= line) prev = b; else { next = b; break; } }
   let y = prev ? prev.y : 0;
@@ -114,6 +128,10 @@ function scrollToLine(line, atEnd) {
 }
 function topLine() {
   const bs = blocks(), y = window.scrollY + 8;
+  if (!bs.length) {
+    const room = document.body.scrollHeight - window.innerHeight;
+    return room > 0 ? (totalLines - 1) * window.scrollY / room : 0;
+  }
   let prev = null, next = null;
   for (const b of bs) { if (b.y <= y) prev = b; else { next = b; break; } }
   if (!prev) return 0;
@@ -166,6 +184,40 @@ def pdf_names(docs: list, folder: Path) -> list[str]:
     return out
 
 
+def _natural(text: str) -> list:
+    """'문서2'가 '문서10'보다 앞에 오도록 숫자는 수로 비교한다."""
+    return [(0, int(t), "") if t.isdigit() else (1, 0, t) for t in re.split(r"(\d+)", text.casefold()) if t]
+
+
+def _mtime(doc) -> float:
+    try:
+        return doc.path.stat().st_mtime if doc.path else float("inf")  # 새 문서는 '가장 최근'
+    except OSError:
+        return 0.0
+
+
+def sort_docs(docs: list, mode: str, reverse: bool = False) -> list:
+    """파일 목록 정렬 순서. docs는 올린 순서. 같은 값끼리는 올린 순서를 지킨다."""
+    keys = {
+        "name": lambda d: _natural(d.name),
+        "kind": lambda d: (_natural(d.path.suffix if d.path else ".md"), _natural(d.name)),
+        "folder": lambda d: (_natural(str(d.path.parent)) if d.path else [], _natural(d.name)),
+        "mtime": lambda d: -_mtime(d),
+    }
+    if mode not in keys:
+        return list(reversed(docs)) if reverse else list(docs)
+    return sorted(docs, key=keys[mode], reverse=reverse)
+
+
+def file_stamp(path: Path | None) -> tuple[float, int] | None:
+    """(고친 시각, 크기) — 다른 프로그램이 파일을 바꿨는지 알아보는 데 쓴다."""
+    try:
+        st = path.stat()
+        return st.st_mtime, st.st_size
+    except (OSError, AttributeError):
+        return None
+
+
 def read_text(path: Path) -> tuple[str, str, str]:
     """(본문, 인코딩, 줄바꿈). 본문의 줄바꿈은 \\n으로 통일한다 — 편집기가 \\n만 쓰므로,
     그대로 두면 Windows(CRLF) 파일이 열자마자 '수정됨'으로 잡힌다. 저장할 때 원래 줄바꿈으로 되돌린다."""
@@ -186,15 +238,26 @@ class Doc:
     saved_text: str = ""
     encoding: str = "UTF-8"  # 읽은 인코딩(표시용). 저장은 항상 UTF-8
     newline: str = "\n"
+    stamp: tuple[float, int] | None = None  # 마지막으로 읽거나 쓴 때의 (고친 시각, 크기)
 
     @property
     def name(self) -> str:
         return self.path.name if self.path else f"새 문서 {self.untitled_no}"
 
     @property
+    def kind(self) -> str:
+        """'md' | 'txt' | 'json' | 'yaml' | 'pdf' — 뷰어가 어떻게 보여 줄지."""
+        return kind_of(self.path)
+
+    @property
+    def is_pdf(self) -> bool:
+        """PDF: 뷰어에서 보기만 한다(원본 편집·저장 없음)."""
+        return self.kind == "pdf"
+
+    @property
     def is_text(self) -> bool:
         """일반 텍스트 파일(.txt): 원본 창에만 보이고, 저장하면 같은 이름의 .md가 된다."""
-        return bool(self.path) and self.path.suffix.lower() == ".txt"
+        return self.kind == "txt"
 
     @property
     def base_dir(self) -> Path | None:
@@ -315,6 +378,25 @@ class MainWindow(QMainWindow):
         self.preview = QWebEngineView()
         self.preview_page = PreviewPage(self.preview)
         self.preview.setPage(self.preview_page)
+        # PDF는 Chromium 내장 PDF 보기로 띄운다(뷰어 자리를 PDF일 때만 이 뷰로 바꿔 끼움)
+        self.pdf_view = QWebEngineView()
+        for attr in (QWebEngineSettings.WebAttribute.PluginsEnabled, QWebEngineSettings.WebAttribute.PdfViewerEnabled):
+            self.pdf_view.settings().setAttribute(attr, True)
+        self.viewer_stack = QStackedWidget()
+        self.viewer_stack.addWidget(self.preview)
+        self.viewer_stack.addWidget(self.pdf_view)
+        self._pdf_shown: Path | None = None  # pdf_view에 올라 있는 파일
+
+        # 다른 프로그램이 파일을 바꾸면 알아채서 다시 읽는다
+        self.watcher = QFileSystemWatcher(self)
+        self.watcher.fileChanged.connect(self._on_file_changed)
+        self._changed: set[Path] = set()
+        self.reload_timer = QTimer(self, singleShot=True, interval=300)  # 저장이 끝날 때까지 잠깐 기다린다
+        self.reload_timer.timeout.connect(self._reload_changed)
+        self._asking_reload = False
+
+        self.sort_mode = str(self.settings.value("sortMode", "added"))
+        self.sort_reverse = self.settings.value("sortReverse", False, type=bool)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setHandleWidth(6)
@@ -324,7 +406,7 @@ class MainWindow(QMainWindow):
         right_box.setContentsMargins(0, 0, 0, 0)
         right_box.setSpacing(0)
         right_box.addWidget(self._build_format_bar())
-        right_box.addWidget(self.preview)
+        right_box.addWidget(self.viewer_stack)
         for w in (self.files, self.editor, right):
             self.splitter.addWidget(w)
         self.splitter.setChildrenCollapsible(False)
@@ -396,6 +478,27 @@ class MainWindow(QMainWindow):
         s.addAction(self.select_all_action)
         act(s, "모두 체크 해제", lambda: self._check_all(False))
 
+        # 정렬: 목록 순서 기준(고르면 바로 다시 늘어놓고, 새로 올린 파일도 그 기준을 따른다)
+        self.sort_menu = QMenu("목록 정렬", self)
+        group = QActionGroup(self)
+        for mode, label in SORT_MODES:
+            a = QAction(label, self, checkable=True)
+            a.setChecked(mode == self.sort_mode)
+            a.triggered.connect(lambda _c=False, m=mode: self.set_sort(m, self.sort_reverse))
+            group.addAction(a)
+            self.sort_menu.addAction(a)
+        self.sort_menu.addSeparator()
+        self.sort_reverse_action = QAction("거꾸로", self, checkable=True)
+        self.sort_reverse_action.setChecked(self.sort_reverse)
+        self.sort_reverse_action.toggled.connect(lambda on: self.set_sort(self.sort_mode, on))
+        self.sort_menu.addAction(self.sort_reverse_action)
+        v.addSeparator()
+        v.addMenu(self.sort_menu)
+        sort_btn = QToolButton()
+        sort_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        sort_btn.setMenu(self.sort_menu)
+        sort_btn.setToolTip("파일 목록 정렬 기준")
+
         bar = self.addToolBar("도구")
         bar.setObjectName("toolbar")
         bar.setMovable(False)
@@ -405,6 +508,7 @@ class MainWindow(QMainWindow):
             (a_open, "파일 올리기"),
             (self.select_all_action, "모두선택"),
             (self.close_checked_action, "선택닫기"),
+            ("sort", None),
             (a_save, "저장"),
             (None, None),
             (a_print, "인쇄"),
@@ -412,9 +516,16 @@ class MainWindow(QMainWindow):
         ):
             if a is None:
                 bar.addSeparator()
+            elif a == "sort":
+                bar.addWidget(sort_btn)
             else:
                 bar.addAction(a)
                 bar.widgetForAction(a).setText(label)
+                sc = a.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
+                if sc and sc not in a.toolTip():  # 단축키를 풍선 도움말에 보인다(예: 저장 (Ctrl+S))
+                    a.setToolTip(f"{label} ({sc})")
+        self.sort_button = sort_btn
+        self._update_sort_button()
 
     # ---------- 서식 버튼(오른쪽 위) — 왼쪽 원본에서 선택한 글자에 적용 ----------
     def _build_format_bar(self) -> QToolBar:
@@ -471,7 +582,7 @@ class MainWindow(QMainWindow):
     def apply_format(self, fn) -> None:
         """선택한 글자(없으면 커서 위치)에 서식을 적용. 같은 버튼을 다시 누르면 해제된다. 되돌리기 한 번에 취소.
         마지막으로 뷰어를 눌렀으면 뷰어에서 선택한 글자를 원본에서 찾아 적용한다."""
-        if self.current is None:
+        if self.current is None or self.current.is_pdf:
             return
         if self._last_pane == "preview":
             self.preview_page.runJavaScript("selectionInfo()", 0, lambda info: self._apply_from_preview(fn, info))
@@ -546,7 +657,9 @@ class MainWindow(QMainWindow):
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         item.setCheckState(Qt.CheckState.Unchecked)
         self.files.addItem(item)
+        self._watch(doc)
         self._refresh_item(doc)
+        self._apply_sort()
         self.files.setCurrentItem(item)
 
     def _on_item_changed(self, item: QListWidgetItem | None, _prev) -> None:
@@ -555,6 +668,10 @@ class MainWindow(QMainWindow):
         doc: Doc = item.data(Qt.ItemDataRole.UserRole)
         self.current = doc
         self.editor.setDocument(doc.qdoc)
+        self.editor.setReadOnly(doc.is_pdf)
+        self.editor.setPlaceholderText(
+            "PDF 파일은 오른쪽 뷰어에서 보기만 합니다(원본 편집 없음)." if doc.is_pdf else ""
+        )
         self.editor.setFocus()
         self._refresh_item(doc)
         self.render_preview()
@@ -582,8 +699,10 @@ class MainWindow(QMainWindow):
             return
         self.st_path.setText(str(d.path) if d.path else "(저장하지 않은 새 문서)")
         self.st_path.setToolTip(str(d.path) if d.path else "")
-        self.st_kind.setText("텍스트(.txt) → 저장 시 .md" if d.is_text else "마크다운")
-        self.st_enc.setText(f"{d.encoding} · {'CRLF' if d.newline == chr(13) + chr(10) else 'LF'}")
+        self.st_kind.setText(
+            {"txt": "텍스트(.txt) → 저장 시 .md", "json": "JSON", "yaml": "YAML", "pdf": "PDF(보기만)"}.get(d.kind, "마크다운")
+        )
+        self.st_enc.setText("" if d.is_pdf else f"{d.encoding} · {'CRLF' if d.newline == chr(13) + chr(10) else 'LF'}")
         self.st_sync.setText("동시보기 켬" if self.sync_action.isChecked() else "동시보기 끔")
         self._update_pos()
 
@@ -612,6 +731,37 @@ class MainWindow(QMainWindow):
     def _sync_select_all(self) -> None:
         """하나씩 체크를 바꿔도 버튼 모양이 실제 상태(모두 체크됨 여부)를 따라가게."""
         self.select_all_action.setChecked(self._all_checked())
+
+    # ---------- 목록 정렬 ----------
+    def set_sort(self, mode: str, reverse: bool) -> None:
+        self.sort_mode, self.sort_reverse = mode, reverse
+        self.settings.setValue("sortMode", mode)
+        self.settings.setValue("sortReverse", reverse)
+        self._update_sort_button()
+        self._apply_sort()
+        label = dict(SORT_MODES).get(mode, mode)
+        self.statusBar().showMessage(f"목록을 '{label}'{' 거꾸로' if reverse else ''} 정렬했습니다.", 3000)
+
+    def _update_sort_button(self) -> None:
+        label = dict(SORT_MODES).get(self.sort_mode, "올린 순서")
+        self.sort_button.setText(f"정렬: {label.split('(')[0]}{' ↑' if self.sort_reverse else ''}")
+
+    def _apply_sort(self) -> None:
+        """목록 칸을 정렬 기준대로 다시 늘어놓는다(체크·지금 보는 파일은 그대로)."""
+        order = sort_docs(self.docs, self.sort_mode, self.sort_reverse)
+        if [self.files.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.files.count())] == order:
+            return
+        cur = self.files.currentItem()
+        self.files.blockSignals(True)
+        try:
+            taken = [self.files.takeItem(0) for _ in range(self.files.count())]
+            by_doc = {id(it.data(Qt.ItemDataRole.UserRole)): it for it in taken}
+            for d in order:
+                self.files.addItem(by_doc[id(d)])
+            if cur is not None:
+                self.files.setCurrentItem(cur)
+        finally:
+            self.files.blockSignals(False)
 
     # ---------- 열기 ----------
     def new_file(self) -> None:
@@ -648,11 +798,11 @@ class MainWindow(QMainWindow):
                 last = existing
                 continue
             try:
-                text, enc, newline = read_text(f)
+                text, enc, newline = ("", "PDF", "\n") if kind_of(f) == "pdf" else read_text(f)
             except OSError as e:
                 QMessageBox.warning(self, "열기 실패", f"{f}\n{e}")
                 continue
-            doc = Doc(path=f, saved_text=text, encoding=enc, newline=newline)
+            doc = Doc(path=f, saved_text=text, encoding=enc, newline=newline, stamp=file_stamp(f))
             doc.qdoc.setPlainText(text)
             doc.qdoc.setModified(False)
             self._add_doc(doc)
@@ -661,15 +811,97 @@ class MainWindow(QMainWindow):
             self.files.setCurrentItem(item)
         self.statusBar().showMessage(f"{len(files)}개 파일을 올렸습니다.", 4000)
 
+    # ---------- 바뀐 파일 다시 읽기(감지) ----------
+    def _watch(self, doc: Doc) -> None:
+        if doc.path and str(doc.path) not in self.watcher.files() and doc.path.exists():
+            self.watcher.addPath(str(doc.path))
+
+    def _unwatch(self, doc: Doc) -> None:
+        if doc.path and str(doc.path) in self.watcher.files():
+            if not any(d is not doc and d.path == doc.path for d in self.docs):
+                self.watcher.removePath(str(doc.path))
+
+    def _on_file_changed(self, path: str) -> None:
+        self._changed.add(Path(path))
+        self.reload_timer.start()  # 여러 번 연달아 와도 한 번만 처리
+
+    def _reload_changed(self) -> None:
+        if self._asking_reload:  # 묻는 창이 떠 있는 동안 온 변경은 창을 닫은 뒤 처리
+            self.reload_timer.start()
+            return
+        changed, self._changed = self._changed, set()
+        for path in changed:
+            for doc in [d for d in self.docs if d.path == path]:
+                self._check_reload(doc)
+
+    def _check_reload(self, doc: Doc) -> None:
+        stamp = file_stamp(doc.path)
+        if stamp is None:  # 지워졌거나 옮겨졌다(목록에는 남겨 둔다 — 저장하면 다시 생긴다)
+            self.statusBar().showMessage(f"파일이 지워졌거나 옮겨졌습니다: {doc.path}", 8000)
+            return
+        self._watch(doc)  # 지우고 새로 쓰는 방식으로 저장하는 프로그램이 있어 다시 건다
+        if stamp == doc.stamp:
+            return
+        doc.stamp = stamp
+        if doc.is_pdf:
+            if doc is self.current:
+                self._show_pdf(doc.path, reload=True)
+            self.statusBar().showMessage(f"바뀐 PDF를 다시 읽었습니다: {doc.name}", 5000)
+            return
+        try:
+            text, enc, newline = read_text(doc.path)
+        except OSError:
+            return
+        if text == doc.saved_text:  # 시각만 바뀜(내용 같음)
+            return
+        if doc.dirty:
+            self._asking_reload = True
+            try:
+                r = QMessageBox.question(
+                    self,
+                    "파일이 바뀜",
+                    f"{doc.name}\n다른 프로그램에서 파일이 바뀌었습니다.\n\n"
+                    "다시 읽을까요? (여기서 고치고 저장하지 않은 내용은 사라집니다 — Ctrl+Z로 되돌릴 수 있음)",
+                )
+            finally:
+                self._asking_reload = False
+            if r != QMessageBox.StandardButton.Yes:
+                return
+        self._replace_text(doc, text, enc, newline)
+        self._apply_sort()  # '고친 시각' 정렬이면 자리가 바뀐다
+        self.statusBar().showMessage(f"바뀐 파일을 다시 읽었습니다: {doc.name}", 5000)
+
+    def _replace_text(self, doc: Doc, text: str, enc: str, newline: str) -> None:
+        """본문을 새 내용으로 갈아 끼운다. 되돌리기(Ctrl+Z)가 되고, 보던 위치·커서는 그대로."""
+        is_cur = doc is self.current
+        bar = self.editor.verticalScrollBar()
+        top, pos = bar.value(), self.editor.textCursor().position()
+        cur = QTextCursor(doc.qdoc)
+        cur.select(QTextCursor.SelectionType.Document)
+        cur.insertText(text)
+        doc.saved_text, doc.encoding, doc.newline = text, enc, newline
+        self._refresh_item(doc)
+        if is_cur:
+            c = self.editor.textCursor()
+            c.setPosition(min(pos, doc.qdoc.characterCount() - 1))
+            self.editor.setTextCursor(c)
+            bar.setValue(top)
+            self._update_status()
+
     # ---------- 저장·닫기 ----------
     def _write(self, doc: Doc, path: Path) -> bool:
         text = doc.qdoc.toPlainText()
+        self._unwatch(doc)  # 내가 쓰는 것을 '다른 프로그램이 바꿈'으로 잡지 않게
         try:
             path.write_text(text, encoding="utf-8", newline=doc.newline)
         except OSError as e:
+            self._watch(doc)
             QMessageBox.warning(self, "저장 실패", f"{path}\n{e}")
             return False
         doc.path, doc.saved_text, doc.encoding = path.resolve(), text, "UTF-8"
+        doc.stamp = file_stamp(doc.path)
+        self._watch(doc)
+        self._apply_sort()  # 이름·고친 시각이 바뀌었을 수 있다
         self.settings.setValue("lastDir", str(path.parent))
         self._refresh_item(doc)
         if doc is self.current:
@@ -679,6 +911,9 @@ class MainWindow(QMainWindow):
         return True
 
     def save(self, doc: Doc) -> bool:
+        if doc.is_pdf:
+            self.statusBar().showMessage("PDF는 보기만 하므로 저장할 것이 없습니다.", 4000)
+            return True
         if doc.path and doc.is_text:
             # 텍스트 파일은 같은 이름의 .md로 저장하고, 그 뒤로는 .md가 원본이 된다(원래 .txt는 그대로 둔다)
             md = doc.path.with_suffix(".md")
@@ -693,11 +928,14 @@ class MainWindow(QMainWindow):
         return self._write(doc, doc.path) if doc.path else self.save_as(doc)
 
     def save_as(self, doc: Doc) -> bool:
+        if doc.is_pdf:
+            self.statusBar().showMessage("PDF는 다른 이름으로 저장할 수 없습니다(보기만).", 4000)
+            return False
         if doc.path:
             start = str(doc.path.with_suffix(".md") if doc.is_text else doc.path)
         else:
             start = str(Path(self._last_dir()) / f"{doc.name}.md")
-        path, _ = QFileDialog.getSaveFileName(self, "다른 이름으로 저장", start, MD_FILTER)
+        path, _ = QFileDialog.getSaveFileName(self, "다른 이름으로 저장", start, SAVE_FILTER)
         return self._write(doc, Path(path)) if path else False
 
     def save_current(self) -> None:
@@ -731,6 +969,7 @@ class MainWindow(QMainWindow):
         return True
 
     def _remove_doc(self, doc: Doc) -> None:
+        self._unwatch(doc)
         item = self._item_of(doc)
         if item:
             self.files.takeItem(self.files.row(item))
@@ -808,6 +1047,10 @@ class MainWindow(QMainWindow):
         self.render_timer.start()
 
     def render_preview(self) -> None:
+        if self.current is not None and self.current.is_pdf:
+            self._show_pdf(self.current.path)
+            return
+        self.viewer_stack.setCurrentWidget(self.preview)
         if not self._preview_ready or self.current is None:
             return
         if self.current.is_text:  # 텍스트 파일은 원본 창에만 — 저장하면 .md가 되어 뷰어에 나온다
@@ -819,9 +1062,20 @@ class MainWindow(QMainWindow):
                 "그때부터 그 .md 파일이 원본이 되어 이 뷰어에 나타납니다.</p></div>"
             )
         else:
-            body = render_body(self.current.qdoc.toPlainText(), self.current.base_dir)
-        self.preview_page.runJavaScript(f"setContent({json.dumps(body)});")
+            body = render_any(self.current.qdoc.toPlainText(), self.current.base_dir, self.current.kind)
+        lines = self.current.qdoc.blockCount()
+        self.preview_page.runJavaScript(f"setContent({json.dumps(body)}, {lines});")
         self.sync_scroll()
+
+    def _show_pdf(self, path: Path, reload: bool = False) -> None:
+        """뷰어 자리에 PDF 보기를 띄운다. 같은 파일이면 다시 읽지 않는다(보던 쪽 유지)."""
+        self.viewer_stack.setCurrentWidget(self.pdf_view)
+        if reload or self._pdf_shown != path:
+            self._pdf_shown = path
+            url = QUrl.fromLocalFile(str(path))
+            if reload:  # 같은 주소는 캐시를 쓸 수 있어 뒤에 표를 붙여 새로 읽힌다
+                url.setQuery(f"r={int((file_stamp(path) or (0, 0))[0] * 1000)}")
+            self.pdf_view.load(url)
 
     def sync_scroll(self) -> None:
         """편집기 → 뷰어 (동시보기가 켜져 있을 때만)."""
@@ -859,18 +1113,24 @@ class MainWindow(QMainWindow):
             for i in range(self.files.count())
             if self.files.item(i).checkState() == Qt.CheckState.Checked
         ]
-        if checked or self.current is None:
-            return checked
-        r = QMessageBox.question(
-            self, what, f"체크한 파일이 없습니다.\n지금 보고 있는 문서만 {what}할까요?"
-        )
-        return [self.current] if r == QMessageBox.StandardButton.Yes else []
+        if not checked and self.current is not None:
+            r = QMessageBox.question(
+                self, what, f"체크한 파일이 없습니다.\n지금 보고 있는 문서만 {what}할까요?"
+            )
+            checked = [self.current] if r == QMessageBox.StandardButton.Yes else []
+        pdfs = [d for d in checked if d.is_pdf]
+        if pdfs:  # PDF는 이미 인쇄용 문서라 여기서 다시 만들지 않는다
+            names = "\n".join(f"  • {d.name}" for d in pdfs[:10]) + ("\n  ..." if len(pdfs) > 10 else "")
+            QMessageBox.information(
+                self, what, f"PDF 파일은 {what}에서 뺍니다(PDF 보기 프로그램에서 인쇄하세요).\n{names}"
+            )
+        return [d for d in checked if not d.is_pdf]
 
     def _load_offscreen(self, docs: list[Doc], on_loaded) -> QWebEngineView:
         """화면에 띄우지 않는 뷰에 인쇄용 HTML을 올리고, 다 읽으면 on_loaded(view, ok)."""
         view = QWebEngineView()
         self._print_jobs.append(view)
-        html = print_document([(d.name, d.qdoc.toPlainText(), d.base_dir) for d in docs])
+        html = print_document([(d.name, d.qdoc.toPlainText(), d.base_dir, d.kind) for d in docs])
         # setHtml은 2MB를 넘으면 조용히 실패하므로 임시 파일로 써서 읽힌다
         fd, tmp = tempfile.mkstemp(prefix="mdeditor-", suffix=".html")
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -1024,7 +1284,7 @@ class MainWindow(QMainWindow):
             self.settings.setValue("shortcutDone", True)
             return
         try:
-            lnk = shortcut.create(desktop, target)
+            lnk = shortcut.create(desktop, target, ICON if ICON.exists() else None)
         except Exception as e:  # noqa: BLE001 — 바로가기 실패로 프로그램이 멈추면 안 된다
             self.settings.setValue("shortcutDone", True)  # 매번 다시 시도하지 않는다(메뉴로 다시 만들 수 있음)
             self.statusBar().showMessage(f"바탕화면 바로가기를 만들지 못했습니다: {e}", 8000)
@@ -1037,6 +1297,14 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("mdEditor")
     app.setApplicationVersion(__version__)
+    if sys.platform == "win32":  # 작업 표시줄에 파이썬 아이콘 대신 mdEditor 아이콘이 보이게
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("KimJin777.mdEditor")
+        except (AttributeError, OSError):
+            pass
+    app.setWindowIcon(QIcon(str(ICON)))
     win = MainWindow()
     win.show()
     if len(sys.argv) > 1:  # 탐색기에서 파일을 끌어다 실행 파일에 놓은 경우
