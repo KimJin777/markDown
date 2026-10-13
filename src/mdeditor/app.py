@@ -11,11 +11,12 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QFileSystemWatcher, QMarginsF, QPoint, QSettings, QStandardPaths, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QFileSystemWatcher, QMarginsF, QPoint, QSettings, QStandardPaths, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
     QCloseEvent,
+    QColor,
     QDesktopServices,
     QFont,
     QIcon,
@@ -32,8 +33,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -41,15 +40,18 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QSplitter,
     QStackedWidget,
+    QStyle,
     QToolBar,
     QToolButton,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from mdeditor import __version__
 from mdeditor.fmt import locate_in_source, py_to_q, q_to_py, set_heading, set_size, toggle_wrap
-from mdeditor import shortcut
+from mdeditor import pdf2md, shortcut
 from mdeditor.render import kind_of, page, print_document, render_any
 
 MD_SUFFIXES = {".md", ".markdown", ".mdown", ".txt", ".json", ".yaml", ".yml", ".pdf"}
@@ -209,6 +211,40 @@ def sort_docs(docs: list, mode: str, reverse: bool = False) -> list:
     return sorted(docs, key=keys[mode], reverse=reverse)
 
 
+def add_root(roots: list[Path], folder: Path) -> list[Path]:
+    """폴더 올리기로 생긴 트리 뿌리 목록. 이미 올린 폴더 안이면 그대로, 새 폴더가 올린 폴더들을 품으면 하나로 합친다."""
+    if any(folder.is_relative_to(r) for r in roots):
+        return roots
+    return [r for r in roots if not r.is_relative_to(folder)] + [folder]
+
+
+def tree_of(docs: list, roots: list[Path], mode: str, reverse: bool = False) -> list:
+    """파일 목록 트리. 항목은 ('dir', 폴더 경로, [자식...]) 또는 ('doc', 문서).
+    올린 폴더(roots) 안의 파일은 하위 폴더 모양 그대로, 낱개로 올린 파일은 맨 위 칸에 둔다.
+    한 칸 안에서는 폴더가 먼저(이름순), 파일은 정렬 기준대로."""
+    top: list = []
+    dirs: dict[Path, list] = {}
+
+    def children_of(path: Path, root: Path) -> list:
+        if path not in dirs:
+            dirs[path] = []
+            (top if path == root else children_of(path.parent, root)).append(("dir", path, dirs[path]))
+        return dirs[path]
+
+    for d in sort_docs(docs, mode, reverse):
+        root = next((r for r in roots if d.path and d.path.is_relative_to(r)), None)
+        (children_of(d.path.parent, root) if root else top).append(("doc", d))
+
+    def arrange(items: list) -> None:
+        folders = sorted((i for i in items if i[0] == "dir"), key=lambda i: _natural(i[1].name or str(i[1])))
+        for f in folders:
+            arrange(f[2])
+        items[:] = folders + [i for i in items if i[0] == "doc"]
+
+    arrange(top)
+    return top
+
+
 def file_stamp(path: Path | None) -> tuple[float, int] | None:
     """(고친 시각, 크기) — 다른 프로그램이 파일을 바꿨는지 알아보는 데 쓴다."""
     try:
@@ -239,6 +275,7 @@ class Doc:
     encoding: str = "UTF-8"  # 읽은 인코딩(표시용). 저장은 항상 UTF-8
     newline: str = "\n"
     stamp: tuple[float, int] | None = None  # 마지막으로 읽거나 쓴 때의 (고친 시각, 크기)
+    changed_outside: bool = False  # 다른 프로그램이 파일을 바꿈 → [새로 불러오기](F5)를 기다리는 중
 
     @property
     def name(self) -> str:
@@ -268,16 +305,53 @@ class Doc:
         return self.qdoc.toPlainText() != self.saved_text
 
 
-class FileList(QListWidget):
-    """올린 파일 목록. 체크한 파일을 한꺼번에 인쇄한다. 파일·폴더를 끌어다 놓을 수 있다."""
+class PdfToMdWorker(QThread):
+    """PDF를 마크다운으로 바꾸는 일을 화면 밖 스레드에서 한다(쪽이 많으면 몇 초 걸림)."""
+
+    converted = Signal(object, object)  # (PDF 경로, 마크다운 글 또는 오류)
+
+    def __init__(self, pdfs: list[Path], parent=None) -> None:
+        super().__init__(parent)
+        self.pdfs = pdfs
+
+    def run(self) -> None:
+        for pdf in self.pdfs:
+            try:
+                self.converted.emit(pdf, pdf2md.convert(pdf))
+            except Exception as e:  # noqa: BLE001 — 깨진 PDF 등: 그 파일만 건너뛰고 알려 준다
+                self.converted.emit(pdf, e)
+
+
+class FileList(QTreeWidget):
+    """올린 파일 목록(트리). 폴더로 올리면 하위 폴더 모양 그대로 보인다. 체크한 파일을 한꺼번에 인쇄한다.
+    파일·폴더를 끌어다 놓을 수 있다. 폴더를 체크하면 그 안의 파일이 모두 체크된다."""
 
     filesDropped = Signal(list)
 
     def __init__(self) -> None:
         super().__init__()
+        self.setHeaderHidden(True)
+        self.setColumnCount(1)
+        self.setIndentation(14)
         self.setAcceptDrops(True)
-        self.setDragDropMode(QListWidget.DragDropMode.DropOnly)
-        self.setToolTip("파일·폴더를 여기로 끌어다 놓으면 올라갑니다.\n체크한 파일은 한꺼번에 인쇄됩니다.")
+        self.setDragDropMode(QTreeWidget.DragDropMode.DropOnly)
+        self.setToolTip(
+            "파일·폴더를 여기로 끌어다 놓으면 올라갑니다(폴더는 하위 폴더까지 트리로).\n"
+            "체크한 파일은 한꺼번에 인쇄됩니다. 폴더를 체크하면 안의 파일이 모두 체크됩니다."
+        )
+
+    def leaves(self) -> list[QTreeWidgetItem]:
+        """파일 칸(폴더 칸 빼고)을 보이는 순서대로."""
+        out: list[QTreeWidgetItem] = []
+
+        def walk(item: QTreeWidgetItem) -> None:
+            if item.data(0, Qt.ItemDataRole.UserRole) is not None:
+                out.append(item)
+            for i in range(item.childCount()):
+                walk(item.child(i))
+
+        walk(self.invisibleRootItem())
+        return out
 
     def dragEnterEvent(self, e) -> None:  # noqa: N802
         if e.mimeData().hasUrls():
@@ -347,6 +421,7 @@ class MainWindow(QMainWindow):
         self.current: Doc | None = None
         self.untitled_count = 0
         self._preview_ready = False
+        self._pdf2md: PdfToMdWorker | None = None  # PDF→마크다운 바꾸는 중인 일
         self._print_jobs: list[QWebEngineView] = []  # 인쇄·PDF가 끝날 때까지 살려 둘 화면 밖 뷰
         self._from_preview = False  # 뷰어 스크롤을 편집기에 옮기는 중(되돌려 보내지 않음)
         self._last_pane = "editor"  # 서식 버튼이 쓸 선택: 마지막으로 누른 칸(편집기/뷰어)
@@ -395,6 +470,10 @@ class MainWindow(QMainWindow):
         self.reload_timer.timeout.connect(self._reload_changed)
         self._asking_reload = False
 
+        self.roots: list[Path] = []  # 폴더 올리기로 올린 폴더(트리 뿌리)
+        self._items: dict[int, QTreeWidgetItem] = {}  # id(문서) → 목록 칸
+        self._collapsed: set[str] = set()  # 접어 둔 폴더
+        self._tree_sig: tuple | None = None  # 지금 그려진 트리 모양
         self.sort_mode = str(self.settings.value("sortMode", "added"))
         self.sort_reverse = self.settings.value("sortReverse", False, type=bool)
 
@@ -417,6 +496,8 @@ class MainWindow(QMainWindow):
         self.render_timer.timeout.connect(self.render_preview)
 
         self.files.currentItemChanged.connect(self._on_item_changed)
+        self.files.itemExpanded.connect(lambda it: self._on_folder_toggled(it, True))
+        self.files.itemCollapsed.connect(lambda it: self._on_folder_toggled(it, False))
         self.files.filesDropped.connect(self.open_paths)
         self.editor.textChanged.connect(self._on_text_changed)
         self.editor.verticalScrollBar().valueChanged.connect(self.sync_scroll)
@@ -445,6 +526,9 @@ class MainWindow(QMainWindow):
         a_new = act(f, "새 파일", self.new_file, QKeySequence.StandardKey.New)
         a_open = act(f, "파일 올리기(여러 개)...", self.open_files_dialog, QKeySequence.StandardKey.Open)
         act(f, "폴더 올리기...", self.open_folder_dialog, "Ctrl+Shift+O")
+        self.reload_action = act(f, "새로 불러오기", self.reload_current, "F5")
+        self.reload_action.setToolTip("다른 프로그램에서 바뀐 파일(목록에 ↻)을 파일에서 다시 읽습니다 (F5)")
+        self.reload_action.setEnabled(False)
         f.addSeparator()
         a_save = act(f, "저장", self.save_current, QKeySequence.StandardKey.Save)
         act(f, "다른 이름으로 저장...", self.save_current_as, "Ctrl+Shift+S")
@@ -457,6 +541,10 @@ class MainWindow(QMainWindow):
         f.addSeparator()
         a_print = act(f, "체크한 파일 인쇄...", self.print_checked, QKeySequence.StandardKey.Print)
         a_pdf = act(f, "체크한 파일 PDF로 저장...", self.save_pdf, "Ctrl+Shift+P")
+        self.pdf2md_action = act(f, "PDF를 마크다운으로 바꾸기", self.convert_pdfs, "Ctrl+Shift+M")
+        self.pdf2md_action.setToolTip(
+            "체크한 PDF(없으면 지금 보는 PDF)를 같은 폴더에 '이름.md'로 바꿔 목록에 올립니다 — 글자·표만, 그림은 빠짐"
+        )
         f.addSeparator()
         act(f, "바탕화면에 바로가기 만들기", lambda: self.make_shortcut())
         f.addSeparator()
@@ -466,6 +554,12 @@ class MainWindow(QMainWindow):
         v.addAction(self.source_action)
         v.addAction(self.toc_action)
         v.addAction(self.sync_action)
+        v.addSeparator()
+        self.auto_reload_action = QAction("바뀐 파일 자동으로 다시 읽기", self, checkable=True)
+        self.auto_reload_action.setToolTip("켜면 다른 프로그램이 바꾼 파일을 F5 없이 바로 다시 읽습니다")
+        self.auto_reload_action.setChecked(self.settings.value("autoReload", False, type=bool))
+        self.auto_reload_action.toggled.connect(self._on_auto_reload_toggled)
+        v.addAction(self.auto_reload_action)
 
         # 모두선택: 누를 때마다 목록 전체 체크 ↔ 전체 해제(토글). 버튼은 '모두 체크됨'일 때 눌린 모양
         self.select_all_action = QAction("모두선택", self, checkable=True)
@@ -506,6 +600,7 @@ class MainWindow(QMainWindow):
         for a, label in (
             (a_new, "새 파일"),
             (a_open, "파일 올리기"),
+            (self.reload_action, "새로 불러오기"),
             (self.select_all_action, "모두선택"),
             (self.close_checked_action, "선택닫기"),
             ("sort", None),
@@ -513,6 +608,7 @@ class MainWindow(QMainWindow):
             (None, None),
             (a_print, "인쇄"),
             (a_pdf, "PDF로 저장"),
+            (self.pdf2md_action, "PDF→MD"),
         ):
             if a is None:
                 bar.addSeparator()
@@ -631,20 +727,28 @@ class MainWindow(QMainWindow):
             self.editor.setFocus()
 
     # ---------- 파일 목록 ----------
-    def _item_of(self, doc: Doc) -> QListWidgetItem | None:
-        for i in range(self.files.count()):
-            item = self.files.item(i)
-            if item.data(Qt.ItemDataRole.UserRole) is doc:
-                return item
-        return None
+    def _item_of(self, doc: Doc) -> QTreeWidgetItem | None:
+        return self._items.get(id(doc))
+
+    def _checked(self) -> list[Doc]:
+        """체크한 파일(보이는 순서대로)."""
+        return [
+            it.data(0, Qt.ItemDataRole.UserRole) for it in self.files.leaves() if it.checkState(0) == Qt.CheckState.Checked
+        ]
 
     def _refresh_item(self, doc: Doc) -> None:
         item = self._item_of(doc)
         if item:
-            item.setText(("● " if doc.dirty else "") + doc.name)
-            item.setToolTip(str(doc.path) if doc.path else "저장하지 않은 새 문서")
+            mark = ("● " if doc.dirty else "") + ("↻ " if doc.changed_outside else "")
+            item.setText(0, mark + doc.name)
+            tip = str(doc.path) if doc.path else "저장하지 않은 새 문서"
+            if doc.changed_outside:
+                tip += "\n다른 프로그램에서 바뀌었습니다 — 새로 불러오기(F5)"
+            item.setToolTip(0, tip)
+            item.setForeground(0, QColor("#bc4c00") if doc.changed_outside else self.files.palette().text())
         if doc is self.current:
             self.setWindowTitle(f"{doc.name}{' *' if doc.dirty else ''} — mdEditor v{__version__}")
+            self.reload_action.setEnabled(doc.changed_outside)
 
     def _add_doc(self, doc: Doc) -> None:
         doc.qdoc.setParent(self)  # 목록에서 닫아도 편집기가 잠시 쥐고 있을 수 있어 창이 소유
@@ -652,25 +756,67 @@ class MainWindow(QMainWindow):
         doc.qdoc.setDefaultFont(self.editor.font())
         doc.qdoc.contentsChanged.connect(lambda d=doc: self._refresh_item(d))
         self.docs.append(doc)
-        item = QListWidgetItem()
-        item.setData(Qt.ItemDataRole.UserRole, doc)
-        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-        item.setCheckState(Qt.CheckState.Unchecked)
-        self.files.addItem(item)
         self._watch(doc)
-        self._refresh_item(doc)
         self._apply_sort()
-        self.files.setCurrentItem(item)
+        self.files.setCurrentItem(self._item_of(doc))
 
-    def _on_item_changed(self, item: QListWidgetItem | None, _prev) -> None:
+    def _rebuild_list(self) -> None:
+        """파일 목록 트리를 문서·올린 폴더·정렬 기준대로 새로 그린다(체크·펼침·지금 보는 파일·스크롤은 그대로)."""
+        checked = {id(d) for d in self._checked()}
+        collapsed = set(self._collapsed)
+        bar = self.files.verticalScrollBar()
+        top = bar.value()
+        folder_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
+        self.files.blockSignals(True)
+        try:
+            self.files.clear()
+            self._items = {}
+
+            def add(parent: QTreeWidgetItem, nodes: list) -> None:
+                for node in nodes:
+                    item = QTreeWidgetItem(parent)
+                    if node[0] == "dir":
+                        path = node[1]
+                        item.setText(0, path.name or str(path))
+                        item.setToolTip(0, str(path))
+                        item.setIcon(0, folder_icon)
+                        item.setData(0, Qt.ItemDataRole.UserRole + 1, str(path))
+                        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
+                        item.setCheckState(0, Qt.CheckState.Unchecked)
+                        add(item, node[2])  # 안의 파일 체크에 따라 폴더 체크(일부만이면 '반쯤')가 정해진다
+                        item.setExpanded(str(path) not in collapsed)
+                    else:
+                        doc = node[1]
+                        item.setData(0, Qt.ItemDataRole.UserRole, doc)
+                        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                        item.setCheckState(0, Qt.CheckState.Checked if id(doc) in checked else Qt.CheckState.Unchecked)
+                        self._items[id(doc)] = item
+                        self._refresh_item(doc)
+
+            add(self.files.invisibleRootItem(), tree_of(self.docs, self.roots, self.sort_mode, self.sort_reverse))
+            if self.current is not None and (cur := self._item_of(self.current)):
+                self.files.setCurrentItem(cur)
+        finally:
+            self.files.blockSignals(False)
+        bar.setValue(top)
+        self._sync_select_all()
+
+    def _on_folder_toggled(self, item: QTreeWidgetItem, expanded: bool) -> None:
+        if path := item.data(0, Qt.ItemDataRole.UserRole + 1):  # 접은 폴더는 다시 그려도 접힌 채로
+            (self._collapsed.discard if expanded else self._collapsed.add)(path)
+
+    def _on_item_changed(self, item: QTreeWidgetItem | None, _prev) -> None:
         if item is None:
             return
-        doc: Doc = item.data(Qt.ItemDataRole.UserRole)
+        doc: Doc | None = item.data(0, Qt.ItemDataRole.UserRole)
+        if doc is None:  # 폴더 칸: 보던 파일을 그대로 둔다
+            return
         self.current = doc
         self.editor.setDocument(doc.qdoc)
         self.editor.setReadOnly(doc.is_pdf)
         self.editor.setPlaceholderText(
-            "PDF 파일은 오른쪽 뷰어에서 보기만 합니다(원본 편집 없음)." if doc.is_pdf else ""
+            "PDF 파일은 오른쪽 뷰어에서 보기만 합니다(원본 편집 없음).\n"
+            "마크다운으로 고치려면 위쪽 [PDF→MD](Ctrl+Shift+M)로 바꾸세요." if doc.is_pdf else ""
         )
         self.editor.setFocus()
         self._refresh_item(doc)
@@ -715,18 +861,22 @@ class MainWindow(QMainWindow):
 
     def _check_all(self, on: bool) -> None:
         state = Qt.CheckState.Checked if on else Qt.CheckState.Unchecked
-        for i in range(self.files.count()):
-            self.files.item(i).setCheckState(state)
+        self.files.blockSignals(True)
+        try:
+            for item in self.files.leaves():  # 폴더 칸은 안의 파일을 따라 저절로 바뀐다
+                item.setCheckState(0, state)
+        finally:
+            self.files.blockSignals(False)
         self._sync_select_all()
 
     def _all_checked(self) -> bool:
-        n = self.files.count()
-        return n > 0 and all(self.files.item(i).checkState() == Qt.CheckState.Checked for i in range(n))
+        leaves = self.files.leaves()
+        return bool(leaves) and all(it.checkState(0) == Qt.CheckState.Checked for it in leaves)
 
     def _toggle_check_all(self) -> None:
         on = not self._all_checked()
         self._check_all(on)
-        self.statusBar().showMessage(f"{self.files.count()}개 파일을 모두 체크했습니다." if on else "체크를 모두 풀었습니다.", 3000)
+        self.statusBar().showMessage(f"{len(self.docs)}개 파일을 모두 체크했습니다." if on else "체크를 모두 풀었습니다.", 3000)
 
     def _sync_select_all(self) -> None:
         """하나씩 체크를 바꿔도 버튼 모양이 실제 상태(모두 체크됨 여부)를 따라가게."""
@@ -747,21 +897,16 @@ class MainWindow(QMainWindow):
         self.sort_button.setText(f"정렬: {label.split('(')[0]}{' ↑' if self.sort_reverse else ''}")
 
     def _apply_sort(self) -> None:
-        """목록 칸을 정렬 기준대로 다시 늘어놓는다(체크·지금 보는 파일은 그대로)."""
-        order = sort_docs(self.docs, self.sort_mode, self.sort_reverse)
-        if [self.files.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.files.count())] == order:
-            return
-        cur = self.files.currentItem()
-        self.files.blockSignals(True)
-        try:
-            taken = [self.files.takeItem(0) for _ in range(self.files.count())]
-            by_doc = {id(it.data(Qt.ItemDataRole.UserRole)): it for it in taken}
-            for d in order:
-                self.files.addItem(by_doc[id(d)])
-            if cur is not None:
-                self.files.setCurrentItem(cur)
-        finally:
-            self.files.blockSignals(False)
+        """목록을 정렬 기준대로 다시 늘어놓는다. 모양(폴더·순서)이 그대로면 다시 그리지 않는다."""
+        self.roots = [r for r in self.roots if any(d.path and d.path.is_relative_to(r) for d in self.docs)]
+        tree = tree_of(self.docs, self.roots, self.sort_mode, self.sort_reverse)
+
+        def sig(nodes: list) -> tuple:
+            return tuple((n[0], str(n[1]), sig(n[2])) if n[0] == "dir" else ("doc", id(n[1])) for n in nodes)
+
+        if (s := sig(tree)) != self._tree_sig:
+            self._tree_sig = s
+            self._rebuild_list()
 
     # ---------- 열기 ----------
     def new_file(self) -> None:
@@ -779,8 +924,10 @@ class MainWindow(QMainWindow):
 
     def open_paths(self, paths: list[str]) -> None:
         files: list[Path] = []
+        folders: list[Path] = []
         for p in map(Path, paths):
             if p.is_dir():
+                folders.append(p.resolve())
                 files += sorted(f for f in p.rglob("*") if f.is_file() and f.suffix.lower() in MD_SUFFIXES)
             elif p.is_file():
                 files.append(p)
@@ -790,6 +937,8 @@ class MainWindow(QMainWindow):
         # 아무것도 쓰지 않은 첫 새 문서는 자리만 차지하므로 치운다
         if len(self.docs) == 1 and self.docs[0].path is None and not self.docs[0].qdoc.toPlainText():
             self._remove_doc(self.docs[0])
+        for folder in folders:  # 올린 폴더는 하위 폴더까지 트리로 보인다
+            self.roots = add_root(self.roots, folder)
         last = None
         for f in files:
             f = f.resolve()
@@ -807,6 +956,7 @@ class MainWindow(QMainWindow):
             doc.qdoc.setModified(False)
             self._add_doc(doc)
             last = doc
+        self._apply_sort()  # 올린 폴더가 기존 폴더를 품으면 트리 모양이 바뀐다
         if last and (item := self._item_of(last)):
             self.files.setCurrentItem(item)
         self.statusBar().showMessage(f"{len(files)}개 파일을 올렸습니다.", 4000)
@@ -835,6 +985,7 @@ class MainWindow(QMainWindow):
                 self._check_reload(doc)
 
     def _check_reload(self, doc: Doc) -> None:
+        """파일이 정말 바뀌었으면 목록에 ↻ 표시를 하고 [새로 불러오기](F5)를 켠다(자동으로 다시 읽기가 켜져 있으면 바로 읽음)."""
         stamp = file_stamp(doc.path)
         if stamp is None:  # 지워졌거나 옮겨졌다(목록에는 남겨 둔다 — 저장하면 다시 생긴다)
             self.statusBar().showMessage(f"파일이 지워졌거나 옮겨졌습니다: {doc.path}", 8000)
@@ -843,18 +994,46 @@ class MainWindow(QMainWindow):
         if stamp == doc.stamp:
             return
         doc.stamp = stamp
+        if not doc.is_pdf:
+            try:
+                text, _enc, _newline = read_text(doc.path)
+            except OSError:
+                return
+            if text == doc.saved_text:  # 시각만 바뀜(내용 같음)
+                return
+        if self.auto_reload_action.isChecked():
+            self._reload_doc(doc)
+            return
+        doc.changed_outside = True
+        self._refresh_item(doc)
+        self.statusBar().showMessage(f"다른 프로그램에서 바뀌었습니다: {doc.name} — 새로 불러오기(F5)", 8000)
+
+    def reload_current(self) -> None:
+        """[새로 불러오기](F5): 지금 보는 파일이 밖에서 바뀌었으면 파일에서 다시 읽는다."""
+        if self.current is not None and self.current.changed_outside:
+            self._reload_doc(self.current)
+
+    def _on_auto_reload_toggled(self, on: bool) -> None:
+        self.settings.setValue("autoReload", on)
+        if on:  # 켜는 순간 기다리던 파일도 다시 읽는다
+            for doc in [d for d in self.docs if d.changed_outside]:
+                self._reload_doc(doc)
+
+    def _reload_doc(self, doc: Doc) -> None:
+        """파일에서 다시 읽는다. 여기서 고치고 저장하지 않은 내용이 있으면 먼저 묻는다."""
         if doc.is_pdf:
+            doc.changed_outside = False
             if doc is self.current:
                 self._show_pdf(doc.path, reload=True)
-            self.statusBar().showMessage(f"바뀐 PDF를 다시 읽었습니다: {doc.name}", 5000)
+            self._refresh_item(doc)
+            self.statusBar().showMessage(f"PDF를 새로 불러왔습니다: {doc.name}", 5000)
             return
         try:
             text, enc, newline = read_text(doc.path)
-        except OSError:
+        except OSError as e:
+            QMessageBox.warning(self, "새로 불러오기", f"{doc.path}\n{e}")
             return
-        if text == doc.saved_text:  # 시각만 바뀜(내용 같음)
-            return
-        if doc.dirty:
+        if doc.dirty and text != doc.qdoc.toPlainText():
             self._asking_reload = True
             try:
                 r = QMessageBox.question(
@@ -866,10 +1045,12 @@ class MainWindow(QMainWindow):
             finally:
                 self._asking_reload = False
             if r != QMessageBox.StandardButton.Yes:
-                return
+                return  # ↻ 표시는 남겨 둔다(나중에 F5로 다시 읽을 수 있게)
+        doc.changed_outside = False
+        doc.stamp = file_stamp(doc.path)
         self._replace_text(doc, text, enc, newline)
         self._apply_sort()  # '고친 시각' 정렬이면 자리가 바뀐다
-        self.statusBar().showMessage(f"바뀐 파일을 다시 읽었습니다: {doc.name}", 5000)
+        self.statusBar().showMessage(f"파일을 새로 불러왔습니다: {doc.name}", 5000)
 
     def _replace_text(self, doc: Doc, text: str, enc: str, newline: str) -> None:
         """본문을 새 내용으로 갈아 끼운다. 되돌리기(Ctrl+Z)가 되고, 보던 위치·커서는 그대로."""
@@ -970,26 +1151,19 @@ class MainWindow(QMainWindow):
 
     def _remove_doc(self, doc: Doc) -> None:
         self._unwatch(doc)
-        item = self._item_of(doc)
-        if item:
-            self.files.takeItem(self.files.row(item))
         self.docs.remove(doc)
-        self._sync_select_all()
+        self._apply_sort()  # 빈 폴더 칸도 함께 치운다
 
     def close_checked(self) -> None:
         """[선택닫기] 버튼: 체크한 파일만 닫는다. 체크한 것이 없으면 아무것도 닫지 않고 알려 준다."""
-        if not any(self.files.item(i).checkState() == Qt.CheckState.Checked for i in range(self.files.count())):
+        if not self._checked():
             self.statusBar().showMessage("닫을 파일을 목록에서 체크하세요.", 4000)
             return
         self.close_current()
 
     def close_current(self) -> None:
         """목록에서 닫기(Ctrl+W): 체크한 파일을 모두 닫는다. 체크한 것이 없으면 지금 보는 파일만."""
-        targets = [
-            self.files.item(i).data(Qt.ItemDataRole.UserRole)
-            for i in range(self.files.count())
-            if self.files.item(i).checkState() == Qt.CheckState.Checked
-        ] or ([self.current] if self.current else [])
+        targets = self._checked() or ([self.current] if self.current else [])
         if not targets or not self._confirm_discard([d for d in targets if d.dirty]):
             return
         if self.current in targets:
@@ -999,7 +1173,7 @@ class MainWindow(QMainWindow):
         if not self.docs:
             self.new_file()
         elif self.current is None:
-            self.files.setCurrentRow(0)
+            self.files.setCurrentItem(self.files.leaves()[0])
         if len(targets) > 1:
             self.statusBar().showMessage(f"{len(targets)}개 파일을 목록에서 닫았습니다.", 4000)
 
@@ -1007,6 +1181,8 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard([d for d in self.docs if d.dirty]):
             e.ignore()
             return
+        if self._pdf2md is not None:  # 바꾸는 중인 스레드를 두고 닫으면 프로그램이 죽는다
+            self._pdf2md.wait()
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("splitter", self.splitter.saveState())
         e.accept()
@@ -1105,14 +1281,64 @@ class MainWindow(QMainWindow):
         if on:
             self.sync_scroll()  # 켜는 순간 뷰어를 편집기 위치로 맞춘다
 
+    # ---------- PDF → 마크다운 ----------
+    def convert_pdfs(self) -> None:
+        """체크한 PDF(없으면 지금 보는 PDF)를 PDF 옆에 '이름.md'로 바꿔 쓰고 목록에 올린다."""
+        if self._pdf2md is not None:
+            self.statusBar().showMessage("PDF를 마크다운으로 바꾸는 중입니다. 끝난 뒤 다시 하세요.", 4000)
+            return
+        checked = self._checked()
+        pdfs = [d.path for d in checked if d.is_pdf] or (
+            [self.current.path] if self.current is not None and self.current.is_pdf else []
+        )
+        if not pdfs:
+            QMessageBox.information(
+                self, "PDF→MD", "바꿀 PDF가 없습니다.\nPDF 파일을 목록에 올려 체크하거나, PDF를 연 채로 다시 누르세요."
+            )
+            return
+        self._pdf2md_total, self._pdf2md_out, self._pdf2md_fail = len(pdfs), [], []
+        self.pdf2md_action.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
+        self.statusBar().showMessage(f"PDF를 마크다운으로 바꾸는 중... (0/{len(pdfs)})")
+        worker = PdfToMdWorker(pdfs, self)
+        worker.converted.connect(self._on_pdf_converted)
+        worker.finished.connect(self._on_pdf2md_finished)
+        self._pdf2md = worker
+        worker.start()
+
+    def _on_pdf_converted(self, pdf: Path, result) -> None:
+        if isinstance(result, Exception):
+            self._pdf2md_fail.append(f"{pdf.name}: {result}")
+        elif not result.strip():  # 글자를 하나도 못 뽑음(스캔본 등)
+            self._pdf2md_fail.append(f"{pdf.name}: 뽑을 글자가 없습니다(스캔한 그림 PDF일 수 있음)")
+        else:
+            out = pdf2md.md_path_for(pdf, set(self._pdf2md_out))
+            try:
+                out.write_text(result, encoding="utf-8")
+                self._pdf2md_out.append(out)
+            except OSError as e:
+                self._pdf2md_fail.append(f"{pdf.name}: {e}")
+        done = len(self._pdf2md_out) + len(self._pdf2md_fail)
+        self.statusBar().showMessage(f"PDF를 마크다운으로 바꾸는 중... ({done}/{self._pdf2md_total})")
+
+    def _on_pdf2md_finished(self) -> None:
+        self._pdf2md.deleteLater()
+        self._pdf2md = None
+        QApplication.restoreOverrideCursor()
+        self.pdf2md_action.setEnabled(True)
+        if self._pdf2md_out:
+            self.open_paths([str(p) for p in self._pdf2md_out])
+            names = ", ".join(p.name for p in self._pdf2md_out[:3]) + (" ..." if len(self._pdf2md_out) > 3 else "")
+            self.statusBar().showMessage(f"PDF {len(self._pdf2md_out)}개를 마크다운으로 바꿨습니다: {names}", 8000)
+        else:
+            self.statusBar().clearMessage()
+        if self._pdf2md_fail:
+            QMessageBox.warning(self, "PDF→MD", "바꾸지 못한 PDF가 있습니다.\n\n" + "\n".join(self._pdf2md_fail))
+
     # ---------- 인쇄·PDF ----------
     def _checked_docs(self, what: str) -> list[Doc]:
         """체크한 문서. 없으면 지금 보는 문서만 할지 묻는다."""
-        checked = [
-            self.files.item(i).data(Qt.ItemDataRole.UserRole)
-            for i in range(self.files.count())
-            if self.files.item(i).checkState() == Qt.CheckState.Checked
-        ]
+        checked = self._checked()
         if not checked and self.current is not None:
             r = QMessageBox.question(
                 self, what, f"체크한 파일이 없습니다.\n지금 보고 있는 문서만 {what}할까요?"
