@@ -424,18 +424,18 @@ class Doc:
 class PdfToMdWorker(QThread):
     """PDF를 마크다운으로 바꾸는 일을 화면 밖 스레드에서 한다(쪽이 많으면 몇 초 걸림)."""
 
-    converted = Signal(object, object)  # (PDF 경로, 마크다운 글 또는 오류)
+    converted = Signal(object, object, object)  # (PDF 경로, 쓸 .md 경로, 마크다운 글 또는 오류)
 
-    def __init__(self, pdfs: list[Path], parent=None) -> None:
+    def __init__(self, jobs: list[tuple[Path, Path]], parent=None) -> None:
         super().__init__(parent)
-        self.pdfs = pdfs
+        self.jobs = jobs  # (PDF, 쓸 .md) — 그림은 .md 옆 '이름_images' 폴더로
 
     def run(self) -> None:
-        for pdf in self.pdfs:
+        for pdf, out in self.jobs:
             try:
-                self.converted.emit(pdf, pdf2md.convert(pdf))
+                self.converted.emit(pdf, out, pdf2md.convert(pdf, out))
             except Exception as e:  # noqa: BLE001 — 깨진 PDF 등: 그 파일만 건너뛰고 알려 준다
-                self.converted.emit(pdf, e)
+                self.converted.emit(pdf, out, e)
 
 
 class FileList(QTreeWidget):
@@ -1596,19 +1596,23 @@ class MainWindow(QMainWindow):
         self.pdf2md_action.setEnabled(False)
         QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
         self.statusBar().showMessage(f"PDF를 마크다운으로 바꾸는 중... (0/{len(pdfs)})")
-        worker = PdfToMdWorker(pdfs, self)
+        jobs: list[tuple[Path, Path]] = []
+        for pdf in pdfs:  # 쓸 이름을 미리 정한다(같은 묶음끼리도 겹치지 않게, 그림 폴더 이름도 여기서 정해짐)
+            jobs.append((pdf, pdf2md.md_path_for(pdf, {o for _p, o in jobs})))
+        worker = PdfToMdWorker(jobs, self)
         worker.converted.connect(self._on_pdf_converted)
         worker.finished.connect(self._on_pdf2md_finished)
         self._pdf2md = worker
         worker.start()
 
-    def _on_pdf_converted(self, pdf: Path, result) -> None:
+    def _on_pdf_converted(self, pdf: Path, out: Path, result) -> None:
         if isinstance(result, Exception):
             self._pdf2md_fail.append(f"{pdf.name}: {result}")
         elif not result.strip():  # 글자를 하나도 못 뽑음(스캔본 등)
             self._pdf2md_fail.append(f"{pdf.name}: 뽑을 글자가 없습니다(스캔한 그림 PDF일 수 있음)")
         else:
-            out = pdf2md.md_path_for(pdf, set(self._pdf2md_out))
+            if out.exists():  # 바꾸는 사이 같은 이름이 생겼으면 덮어쓰지 않는다
+                out = pdf2md.md_path_for(pdf, set(self._pdf2md_out))
             try:
                 out.write_text(result, encoding="utf-8")
                 self._pdf2md_out.append(out)

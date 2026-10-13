@@ -45,3 +45,8 @@ def test_version_key_numeric():
 
 def test_real_changelog_is_found():
     assert sections(read_changelog())  # 개발 실행에서도 저장소의 CHANGELOG.md를 찾는다
+
+
+def test_public_changelog_keeps_only_latest_two():
+    """공개 저장소·설치본에 들어가는 CHANGELOG.md는 최근 두 버전만(전체는 docs/변경이력-전체.md, 저장소 제외)."""
+    assert len(sections(read_changelog())) <= 2

@@ -6,6 +6,7 @@ import html
 import json
 import re
 from pathlib import Path
+from urllib.parse import unquote
 
 import yaml
 from markdown_it import MarkdownIt
@@ -42,7 +43,10 @@ def _absolute(src: str, base_dir: Path | None) -> str:
     """상대 경로 이미지·링크를 파일 위치 기준 file:// 주소로 바꾼다(인쇄 때 여러 파일을 합치므로)."""
     if base_dir is None or not src or src.startswith("#") or _URL_SCHEME.match(src):
         return src
-    return (base_dir / src).resolve().as_uri()
+    path, frag = (src.split("#", 1) + [""])[:2]
+    # markdown-it이 한글·빈칸을 %EC..·%20으로 바꿔 두므로 풀어서 파일 경로로 만든다(안 풀면 %25EC로 두 번 바뀌어 그림이 안 보임)
+    uri = (base_dir / unquote(path)).resolve().as_uri()
+    return uri + ("#" + frag if frag else "")
 
 
 def render_body(text: str, base_dir: Path | None = None) -> str:

@@ -35,6 +35,13 @@ def test_relative_image_becomes_absolute(tmp_path: Path):
     assert 'href="#x"' in html
 
 
+def test_korean_image_name_not_encoded_twice(tmp_path: Path):
+    html = render_body("![](그림_images/한글-001.png) ![](<빈칸 폴더/a b.png>)", tmp_path)
+    assert (tmp_path / "그림_images" / "한글-001.png").resolve().as_uri() in html
+    assert (tmp_path / "빈칸 폴더" / "a b.png").resolve().as_uri() in html
+    assert "%25" not in html
+
+
 def test_print_document_breaks_page_per_file():
     html = print_document([("a.md", "# A", None), ("b.md", "# B", None)])
     assert html.count("<section class='doc'>") == 2
