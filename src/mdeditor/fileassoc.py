@@ -1,0 +1,94 @@
+"""'.md 파일을 mdEditor로 열기' 등록 — 지금 사용자(HKCU)의 레지스트리만 쓴다(관리자 권한 필요 없음).
+
+Windows 10/11은 프로그램이 '기본 앱'을 직접 바꾸지 못하게 막아 두었다. 그래서 여기서는 mdEditor를
+'연결 프로그램' 목록에 올리기만 하고, 마지막 '항상' 선택은 사용자가 한 번 고른다.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+PROG_ID = "mdEditor.md"
+EXTENSIONS = (".md", ".markdown", ".mdown")
+CLASSES = r"Software\Classes"
+
+
+def registry_entries(exe: Path, icon: Path | None) -> list[tuple[str, str, str | None]]:
+    """(키, 값 이름, 값) 목록. 값 이름 ''는 기본값, 값 None은 빈 표시(REG_NONE)."""
+    open_cmd = f'"{exe}" "%1"'
+    entries = [
+        (rf"{PROG_ID}", "", "마크다운 문서"),
+        (rf"{PROG_ID}\DefaultIcon", "", f"{icon or exe},0"),
+        (rf"{PROG_ID}\shell\open\command", "", open_cmd),
+        (rf"Applications\{exe.name}", "FriendlyAppName", "mdEditor"),
+        (rf"Applications\{exe.name}\shell\open\command", "", open_cmd),
+    ]
+    for ext in EXTENSIONS:
+        entries.append((rf"{ext}\OpenWithProgids", PROG_ID, None))
+        entries.append((rf"Applications\{exe.name}\SupportedTypes", ext, ""))
+    return entries
+
+
+def _notify() -> None:
+    """탐색기에 '연결이 바뀌었다'고 알린다(아이콘·연결 프로그램 목록을 새로 읽게)."""
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)  # SHCNE_ASSOCCHANGED
+    except (AttributeError, OSError):
+        pass
+
+
+def register(exe: Path, icon: Path | None = None, root: str = CLASSES) -> None:
+    import winreg
+
+    for key, name, value in registry_entries(exe, icon):
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{root}\{key}") as k:
+            if value is None:
+                winreg.SetValueEx(k, name, 0, winreg.REG_NONE, b"")
+            else:
+                winreg.SetValueEx(k, name, 0, winreg.REG_SZ, value)
+    _notify()
+
+
+def _delete_tree(winreg, root, path: str) -> None:
+    try:
+        with winreg.OpenKey(root, path, 0, winreg.KEY_ALL_ACCESS) as k:
+            while True:
+                try:
+                    sub = winreg.EnumKey(k, 0)
+                except OSError:
+                    break
+                _delete_tree(winreg, root, rf"{path}\{sub}")
+        winreg.DeleteKey(root, path)
+    except FileNotFoundError:
+        pass
+
+
+def unregister(exe_name: str = "mdEditor.exe", root: str = CLASSES) -> None:
+    """등록한 것만 지운다(.md 키 자체나 다른 프로그램 연결은 건드리지 않음)."""
+    import winreg
+
+    hk = winreg.HKEY_CURRENT_USER
+    _delete_tree(winreg, hk, rf"{root}\{PROG_ID}")
+    _delete_tree(winreg, hk, rf"{root}\Applications\{exe_name}")
+    for ext in EXTENSIONS:
+        try:
+            with winreg.OpenKey(hk, rf"{root}\{ext}\OpenWithProgids", 0, winreg.KEY_SET_VALUE) as k:
+                winreg.DeleteValue(k, PROG_ID)
+        except FileNotFoundError:
+            pass
+    _notify()
+
+
+def is_registered(root: str = CLASSES) -> bool:
+    if sys.platform != "win32":
+        return False
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"{root}\{PROG_ID}\shell\open\command"):
+            return True
+    except FileNotFoundError:
+        return False

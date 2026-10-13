@@ -5,7 +5,7 @@ uv sync -q
 uv run --no-sync pyinstaller --noconfirm --clean --windowed --name mdEditor ^
   --distpath dist --workpath build --specpath build ^
   --copy-metadata markdown-editor ^
-  --icon "%~dp0src\mdeditor\icon.ico" --add-data "%~dp0src\mdeditor\icon.ico;mdeditor" ^
+  --icon "%~dp0src\mdeditor\icon.ico" --add-data "%~dp0src\mdeditor\icon.ico;mdeditor" --add-data "%~dp0CHANGELOG.md;mdeditor" ^
   --collect-submodules pygments.lexers --collect-submodules pygments.styles ^
   --collect-all pymupdf --collect-all pymupdf4llm ^
   packaging\launch.py

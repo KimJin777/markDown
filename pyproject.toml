@@ -1,6 +1,6 @@
 [project]
 name = "markdown-editor"
-version = "0.6.0"
+version = "0.7.0"
 description = "파일 탐색기·편집기·뷰어 세 칸 마크다운 편집기"
 requires-python = ">=3.12,<3.14"
 license = "AGPL-3.0-or-later"
@@ -26,6 +26,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mdeditor"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"CHANGELOG.md" = "mdeditor/CHANGELOG.md"  # 프로그램 안 [도움말 → 새 기능·변경 이력]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

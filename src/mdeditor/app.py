@@ -6,6 +6,7 @@ import html
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -31,6 +32,8 @@ from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QLabel,
     QMainWindow,
@@ -51,7 +54,7 @@ from PySide6.QtWidgets import (
 
 from mdeditor import __version__
 from mdeditor.fmt import locate_in_source, py_to_q, q_to_py, set_heading, set_size, toggle_wrap
-from mdeditor import pdf2md, shortcut
+from mdeditor import changelog, fileassoc, pdf2md, shortcut, single
 from mdeditor.render import kind_of, page, print_document, render_any
 
 MD_SUFFIXES = {".md", ".markdown", ".mdown", ".txt", ".json", ".yaml", ".yml", ".pdf"}
@@ -77,15 +80,91 @@ PREVIEW_JS = """
 #toc .empty { color: #8c959f; }
 body.toc-on #toc { display: block; }
 body.toc-on #content { margin-left: 250px; }
+#content img { cursor: zoom-in; }
+#slides { display: none; position: fixed; inset: 0; z-index: 1000; background: #111; color: #e6edf3;
+          flex-direction: column; user-select: none; }
+body.slides-on #slides { display: flex; }
+body.slides-on { overflow: hidden; }
+#slides .s-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 16px; position: relative; }
+#slides .s-stage img { max-width: 100%; max-height: 100%; object-fit: contain; background: #fff; box-shadow: 0 2px 16px #000a; }
+#slides .s-nav { position: absolute; top: 0; bottom: 0; width: 30%; cursor: pointer; display: flex; align-items: center;
+                 font-size: 44px; color: #fff0; transition: color .15s; }
+#slides .s-nav:hover { color: #fffa; }
+#slides .s-prev { left: 0; padding-left: 18px; } #slides .s-next { right: 0; justify-content: flex-end; padding-right: 18px; }
+#slides .s-bar { display: flex; gap: 14px; align-items: baseline; padding: 8px 16px 10px; background: #000; font-size: 14px; }
+#slides .s-count { font-weight: 600; white-space: nowrap; }
+#slides .s-cap { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#slides .s-sec { color: #9198a1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 35%; }
+#slides .s-help { color: #6e7681; white-space: nowrap; font-size: 12px; }
+#slides .s-close { cursor: pointer; padding: 0 4px; font-size: 18px; } #slides .s-close:hover { color: #fff; }
 </style>
 <nav id="toc"></nav>
+<div id="slides">
+  <div class="s-stage"><img alt=""><div class="s-nav s-prev">‹</div><div class="s-nav s-next">›</div></div>
+  <div class="s-bar"><span class="s-count"></span><span class="s-cap"></span><span class="s-sec"></span>
+    <span class="s-help">← → 넘기기 · Esc 닫기 · F11 전체 화면</span><span class="s-close" title="닫기 (Esc)">✕</span></div>
+</div>
 <script>
 let quietUntil = 0;  // 프로그램이 움직인 스크롤은 편집기로 되돌려 보내지 않는다(서로 밀고 당기기 방지)
 const hush = () => { quietUntil = Date.now() + 200; };
 const blocks = () => Array.from(document.querySelectorAll('#content [data-line]'))
   .map(el => ({ n: +el.dataset.line, y: el.getBoundingClientRect().top + window.scrollY }));
 let totalLines = 1;  // 원본 줄 수(줄 표시가 없는 보기에서 비율 스크롤에 씀)
-function setContent(html, lines) { hush(); totalLines = lines || 1; document.getElementById('content').innerHTML = html; buildToc(); }
+function setContent(html, lines) {
+  hush(); totalLines = lines || 1; document.getElementById('content').innerHTML = html; buildToc();
+  if (slidesOn()) { slides = contentImages(); if (slides.length) showSlide(Math.min(si, slides.length - 1)); else closeSlides(); }
+}
+// 그림 슬라이드: 본문의 그림만 모아 한 장씩 크게 본다(그림을 누르면 그 그림부터)
+let slides = [], si = 0, wheelAt = 0;
+const S = document.getElementById('slides');
+const contentImages = () => Array.from(document.querySelectorAll('#content img'));
+const slidesOn = () => document.body.classList.contains('slides-on');
+function openSlides(start) {  // 그림 개수를 돌려준다(0이면 열지 않음)
+  slides = contentImages();
+  if (!slides.length) return 0;
+  document.body.classList.add('slides-on');
+  showSlide(Math.max(0, Math.min(start || 0, slides.length - 1)));
+  return slides.length;
+}
+function closeSlides() { document.body.classList.remove('slides-on'); }
+function showSlide(i) {
+  si = (i + slides.length) % slides.length;  // 끝에서 넘기면 처음으로
+  const im = slides[si];
+  S.querySelector('.s-stage img').src = im.currentSrc || im.src;
+  S.querySelector('.s-count').textContent = (si + 1) + ' / ' + slides.length;
+  S.querySelector('.s-cap').textContent = im.alt || im.title || '';
+  let sec = '';  // 그림이 들어 있는 절 제목
+  heads.forEach(h => { if (h.compareDocumentPosition(im) & Node.DOCUMENT_POSITION_FOLLOWING) sec = h.textContent; });
+  S.querySelector('.s-sec').textContent = sec ? '§ ' + sec : '';
+}
+S.querySelector('.s-prev').onclick = () => showSlide(si - 1);
+S.querySelector('.s-next').onclick = () => showSlide(si + 1);
+S.querySelector('.s-close').onclick = closeSlides;
+S.addEventListener('wheel', e => {
+  e.preventDefault();
+  if (Date.now() - wheelAt < 250) return;  // 휠 한 번에 한 장
+  wheelAt = Date.now();
+  showSlide(si + (e.deltaY > 0 ? 1 : -1));
+}, { passive: false });
+document.addEventListener('click', e => {
+  const im = e.target.closest && e.target.closest('#content img');
+  if (!im) return;
+  e.preventDefault();  // 그림에 걸린 링크로 가지 않는다
+  openSlides(contentImages().indexOf(im));
+}, true);
+document.addEventListener('keydown', e => {
+  if (!slidesOn()) {
+    if (e.key === 'Escape') console.log('__mdesc__');  // 전체 화면이면 끈다
+    return;
+  }
+  const go = { ArrowRight: 1, ArrowDown: 1, PageDown: 1, ' ': 1, ArrowLeft: -1, ArrowUp: -1, PageUp: -1 }[e.key];
+  if (go) showSlide(si + go);
+  else if (e.key === 'Home') showSlide(0);
+  else if (e.key === 'End') showSlide(slides.length - 1);
+  else if (e.key === 'Escape') closeSlides();
+  else return;
+  e.preventDefault();
+});
 // 목차: 본문 제목(h1~h6)으로 왼쪽 목록을 만들고, 누르면 그 제목으로 이동(동시보기면 원본도 따라감)
 let heads = [];
 function buildToc() {
@@ -391,11 +470,14 @@ class PreviewPage(QWebEnginePage):
 
     openMarkdown = Signal(str)
     scrolled = Signal(float, bool)  # 뷰어를 사람이 스크롤함: (원본 줄 번호, 맨 끝인지)
+    escPressed = Signal()  # 그림 슬라이드가 닫혀 있을 때 뷰어에서 Esc
 
     def javaScriptConsoleMessage(self, level, message: str, line: int, source: str) -> None:  # noqa: N802
         if message.startswith("__mdscroll__ "):
             _, ln, at_end = message.split()
             self.scrolled.emit(float(ln), at_end == "true")
+        elif message == "__mdesc__":
+            self.escPressed.emit()
 
     def acceptNavigationRequest(self, url: QUrl, nav_type, is_main_frame: bool) -> bool:  # noqa: N802
         if nav_type != QWebEnginePage.NavigationType.NavigationTypeLinkClicked:
@@ -441,6 +523,20 @@ class MainWindow(QMainWindow):
         self.toc_action.setChecked(self.settings.value("toc", True, type=bool))
         self.toc_action.toggled.connect(self._on_toc_toggled)
 
+        # 그림 슬라이드: 본문의 그림만 모아 한 장씩 크게 본다
+        self.slides_action = QAction("그림", self)
+        self.slides_action.setToolTip("문서의 그림만 슬라이드로 봅니다 — ← → 넘기기, Esc 닫기 (Ctrl+Shift+G)\n뷰어에서 그림을 눌러도 그 그림부터 열립니다")
+        self.slides_action.setShortcut("Ctrl+Shift+G")
+        self.slides_action.triggered.connect(self.show_slides)
+        self.addAction(self.slides_action)  # 전체 화면에서 서식 줄이 숨어도 단축키가 듣게
+
+        # 전체 화면: 뷰어만 화면 가득(F11 또는 Esc로 돌아옴)
+        self.fullscreen_action = QAction("전체 화면 보기", self, checkable=True)
+        self.fullscreen_action.setToolTip("뷰어만 화면 가득 봅니다 — 돌아오려면 F11 또는 Esc (F11)")
+        self.fullscreen_action.setShortcut("F11")
+        self.fullscreen_action.toggled.connect(self._on_fullscreen_toggled)
+        self.addAction(self.fullscreen_action)  # 메뉴 줄을 숨겨도 F11이 듣게
+
         # 소스: 끄면 원본 편집기를 숨기고 뷰어만 본다
         self.source_action = QAction("소스", self, checkable=True)
         self.source_action.setToolTip("원본(소스) 창을 보이거나 숨깁니다 — 끄면 뷰어만 보입니다 (Ctrl+Shift+E)")
@@ -484,7 +580,8 @@ class MainWindow(QMainWindow):
         right_box = QVBoxLayout(right)
         right_box.setContentsMargins(0, 0, 0, 0)
         right_box.setSpacing(0)
-        right_box.addWidget(self._build_format_bar())
+        self.format_bar = self._build_format_bar()
+        right_box.addWidget(self.format_bar)
         right_box.addWidget(self.viewer_stack)
         for w in (self.files, self.editor, right):
             self.splitter.addWidget(w)
@@ -503,6 +600,7 @@ class MainWindow(QMainWindow):
         self.editor.verticalScrollBar().valueChanged.connect(self.sync_scroll)
         self.preview_page.openMarkdown.connect(lambda p: self.open_paths([p]))
         self.preview_page.scrolled.connect(self._on_preview_scrolled)
+        self.preview_page.escPressed.connect(lambda: self.fullscreen_action.setChecked(False))
         self.preview.loadFinished.connect(self._on_preview_loaded)
 
         self._build_menu()
@@ -547,6 +645,8 @@ class MainWindow(QMainWindow):
         )
         f.addSeparator()
         act(f, "바탕화면에 바로가기 만들기", lambda: self.make_shortcut())
+        act(f, ".md 파일을 mdEditor로 열기 등록...", self.register_file_assoc)
+        act(f, ".md 파일 연결 등록 해제", self.unregister_file_assoc)
         f.addSeparator()
         act(f, "끝내기", self.close, "Ctrl+Q")
 
@@ -554,6 +654,9 @@ class MainWindow(QMainWindow):
         v.addAction(self.source_action)
         v.addAction(self.toc_action)
         v.addAction(self.sync_action)
+        v.addSeparator()
+        v.addAction(self.slides_action)
+        v.addAction(self.fullscreen_action)
         v.addSeparator()
         self.auto_reload_action = QAction("바뀐 파일 자동으로 다시 읽기", self, checkable=True)
         self.auto_reload_action.setToolTip("켜면 다른 프로그램이 바꾼 파일을 F5 없이 바로 다시 읽습니다")
@@ -592,6 +695,10 @@ class MainWindow(QMainWindow):
         sort_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         sort_btn.setMenu(self.sort_menu)
         sort_btn.setToolTip("파일 목록 정렬 기준")
+
+        h = self.menuBar().addMenu("도움말(&H)")
+        act(h, "새 기능·변경 이력...", lambda: self.show_changelog())
+        act(h, "mdEditor 정보...", self.show_about)
 
         bar = self.addToolBar("도구")
         bar.setObjectName("toolbar")
@@ -667,6 +774,10 @@ class MainWindow(QMainWindow):
         bar.addAction(self.source_action)
         bar.addAction(self.toc_action)
         bar.addAction(self.sync_action)
+        bar.addSeparator()
+        bar.addAction(self.slides_action)
+        bar.addAction(self.fullscreen_action)
+        bar.widgetForAction(self.fullscreen_action).setText("전체 화면")
         return bar
 
     def _on_focus_changed(self, _old, new) -> None:
@@ -836,6 +947,12 @@ class MainWindow(QMainWindow):
         sb.addWidget(self.st_path, 1)  # 왼쪽: 파일 경로(남는 폭 전부)
         for w in (self.st_kind, self.st_pos, self.st_enc, self.st_sync):
             sb.addPermanentWidget(w)
+        ver = QToolButton()  # 맨 오른쪽 버전 — 누르면 변경 이력
+        ver.setText(f"v{__version__}")
+        ver.setAutoRaise(True)
+        ver.setToolTip("새 기능·변경 이력 보기")
+        ver.clicked.connect(lambda: self.show_changelog())
+        sb.addPermanentWidget(ver)
         self.editor.cursorPositionChanged.connect(self._update_pos)
         self.sync_action.toggled.connect(lambda _on: self._update_status())
 
@@ -1213,6 +1330,46 @@ class MainWindow(QMainWindow):
             self.sync_scroll()
         self.statusBar().showMessage("소스 켬" if on else "소스 끔 — 뷰어만 봅니다 (다시 켜려면 '소스' 버튼)", 3000)
 
+    # ---------- 그림 슬라이드·전체 화면 ----------
+    def show_slides(self) -> None:
+        d = self.current
+        if d is None or not self._preview_ready or d.is_pdf or d.is_text:
+            self.statusBar().showMessage("그림 슬라이드는 마크다운 문서에서 볼 수 있습니다.", 4000)
+            return
+
+        def opened(n) -> None:
+            if n:
+                self.preview.setFocus()  # 화살표·Esc가 슬라이드로 가게
+                self.statusBar().showMessage(f"그림 {n}장 — ← → 넘기기, Esc 닫기, F11 전체 화면", 5000)
+            else:
+                self.statusBar().showMessage("이 문서에는 그림이 없습니다.", 4000)
+
+        self.preview_page.runJavaScript("openSlides(0)", 0, opened)
+
+    def _on_fullscreen_toggled(self, on: bool) -> None:
+        """뷰어만 화면 가득. 숨긴 칸·창 크기는 끌 때 그대로 돌아온다."""
+        panes = (self.menuBar(), self.statusBar(), self.format_bar, self.files, *self.findChildren(QToolBar, "toolbar"))
+        if on:
+            self._before_full = (self.isMaximized(), self.splitter.saveState(), self.editor.isVisible())
+            for w in (*panes, self.editor):
+                w.setVisible(False)
+            self.showFullScreen()
+            self.preview.setFocus()
+        else:
+            maximized, state, editor_on = getattr(self, "_before_full", (False, None, True))
+            for w in panes:
+                w.setVisible(True)
+            self.editor.setVisible(editor_on)
+            self.showMaximized() if maximized else self.showNormal()
+            if state is not None:
+                self.splitter.restoreState(state)
+
+    def keyPressEvent(self, e) -> None:  # noqa: N802
+        if e.key() == Qt.Key.Key_Escape and self.fullscreen_action.isChecked():
+            self.fullscreen_action.setChecked(False)
+            return
+        super().keyPressEvent(e)
+
     def _on_toc_toggled(self, on: bool, save: bool = True) -> None:
         if save:
             self.settings.setValue("toc", on)
@@ -1495,6 +1652,52 @@ class MainWindow(QMainWindow):
         if s := self.settings.value("splitter"):
             self.splitter.restoreState(s)
 
+    # ---------- 버전·변경 이력 ----------
+    def show_changelog(self, text: str | None = None, title: str = "새 기능·변경 이력") -> None:
+        """변경 이력(CHANGELOG.md)을 뷰어와 같은 모양으로 보여 준다. text를 주면 그 부분만."""
+        text = changelog.read_changelog() if text is None else text
+        if not text.strip():
+            QMessageBox.information(self, title, f"mdEditor v{__version__}\n변경 이력 파일을 찾지 못했습니다.")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"{title} — mdEditor v{__version__}")
+        dlg.resize(780, 640)
+        box = QVBoxLayout(dlg)
+        view = QWebEngineView(dlg)
+        view.setPage(PreviewPage(view))  # 이력 속 링크는 기본 브라우저로
+        view.setHtml(page(render_any(text, None, "md"), title=title), QUrl("about:blank"))
+        box.addWidget(view)
+        buttons = QDialogButtonBox()
+        buttons.addButton("닫기", QDialogButtonBox.ButtonRole.RejectRole)
+        if len(changelog.sections(text)) < len(changelog.sections(changelog.read_changelog())):  # 일부만 보는 중
+            buttons.addButton("전체 이력 보기", QDialogButtonBox.ButtonRole.ActionRole).clicked.connect(
+                lambda: (dlg.accept(), self.show_changelog())
+            )
+        buttons.rejected.connect(dlg.reject)
+        box.addWidget(buttons)
+        dlg.exec()
+
+    def show_whats_new(self) -> None:
+        """새 버전으로 처음 켰을 때 한 번: 지난번에 쓰던 버전 다음부터 바뀐 내용."""
+        last = self.settings.value("lastSeenVersion", None)
+        if last == __version__:
+            return
+        self.settings.setValue("lastSeenVersion", __version__)
+        text = changelog.changes_since(changelog.read_changelog(), last, __version__)
+        if text:
+            self.show_changelog(text, "새 버전에서 바뀐 내용")
+
+    def show_about(self) -> None:
+        QMessageBox.about(
+            self,
+            "mdEditor 정보",
+            f"<h3>mdEditor v{__version__}</h3>"
+            "<p>Windows용 마크다운 편집기 — [파일 목록 | 원본 | 뷰어]</p>"
+            "<p><a href='https://github.com/KimJin777/markDown'>github.com/KimJin777/markDown</a></p>"
+            "<p>업데이트: <code>uv tool upgrade markdown-editor</code></p>"
+            "<p>라이선스: GNU AGPL v3.0 이상</p>",
+        )
+
     # ---------- 바탕화면 바로가기 ----------
     def make_shortcut(self, first_run: bool = False) -> None:
         """처음 실행할 때 한 번 자동으로, 또는 메뉴에서 직접 바탕화면에 mdEditor 바로가기를 만든다."""
@@ -1518,6 +1721,68 @@ class MainWindow(QMainWindow):
         self.settings.setValue("shortcutDone", True)
         self.statusBar().showMessage(f"바탕화면에 바로가기를 만들었습니다: {lnk}", 8000)
 
+    # ---------- .md 파일 연결·한 번만 실행 ----------
+    def register_file_assoc(self) -> None:
+        """mdEditor를 .md 파일의 '연결 프로그램'에 올리고, Windows의 '항상 이 앱으로 열기' 고르는 창을 띄운다."""
+        title = ".md 파일 연결"
+        exe = shortcut.launcher_path()
+        if exe is None:
+            QMessageBox.information(self, title, "개발용 실행에서는 등록하지 않습니다.\n설치한 mdEditor(또는 실행 파일)로 실행해 주세요.")
+            return
+        try:
+            fileassoc.register(exe, ICON if ICON.exists() else None)
+        except OSError as e:
+            QMessageBox.warning(self, title, f"등록하지 못했습니다.\n{e}")
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle(title)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(
+            "mdEditor를 .md 파일의 '연결 프로그램'에 올렸습니다.\n\n"
+            "마지막으로 Windows에서 한 번만 고르면 됩니다(Windows가 프로그램이 직접 바꾸는 것을 막아 둠).\n"
+            "[지금 고르기]를 누르면 나오는 창에서 mdEditor를 고르고 '항상'을 누르세요."
+        )
+        pick = box.addButton("지금 고르기", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("나중에", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is pick:
+            self._pick_default_app()
+
+    def _pick_default_app(self) -> None:
+        """'이 파일을 어떻게 여시겠어요?' 창. .md 파일이 하나 있어야 해서, 보던 .md가 없으면 임시 파일을 쓴다."""
+        d = self.current
+        if d is not None and d.path and d.path.suffix.lower() == ".md" and d.path.exists():
+            sample = d.path
+        else:
+            sample = Path(tempfile.gettempdir()) / "mdEditor 연결 고르기.md"
+            sample.write_text("# mdEditor\n", encoding="utf-8")
+        try:
+            subprocess.Popen(["rundll32.exe", "shell32.dll,OpenAs_RunDLL", str(sample)])
+        except OSError:
+            QDesktopServices.openUrl(QUrl("ms-settings:defaultapps"))  # 설정 → 앱 → 기본 앱
+
+    def unregister_file_assoc(self) -> None:
+        try:
+            fileassoc.unregister((shortcut.launcher_path() or Path("mdEditor.exe")).name)
+        except OSError as e:
+            QMessageBox.warning(self, ".md 파일 연결", f"해제하지 못했습니다.\n{e}")
+            return
+        QMessageBox.information(
+            self,
+            ".md 파일 연결",
+            "mdEditor를 .md 파일의 '연결 프로그램'에서 뺐습니다.\n"
+            "기본 앱으로 골라 두었다면 Windows 설정 → 앱 → 기본 앱에서 다른 프로그램을 고르세요.",
+        )
+
+    def receive_paths(self, paths: list[str]) -> None:
+        """다른 곳에서 mdEditor를 또 실행함(.md 더블클릭 등): 새 창 대신 이 창에 올리고 앞으로 나온다."""
+        if paths:
+            self.open_paths(paths)
+        if self.isMinimized():
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
 
 def main() -> None:
     app = QApplication(sys.argv)
@@ -1531,11 +1796,16 @@ def main() -> None:
         except (AttributeError, OSError):
             pass
     app.setWindowIcon(QIcon(str(ICON)))
+    paths = [str(Path(a).resolve()) for a in sys.argv[1:]]  # .md 더블클릭·실행 파일에 끌어다 놓기
+    if single.send_to_running(paths):  # 이미 켜져 있으면 그 창에 넘기고 끝낸다
+        sys.exit(0)
     win = MainWindow()
     win.show()
-    if len(sys.argv) > 1:  # 탐색기에서 파일을 끌어다 실행 파일에 놓은 경우
-        win.open_paths(sys.argv[1:])
+    win._single = single.listen(win.receive_paths, parent=win)  # 다음에 실행되는 mdEditor가 넘기는 파일을 받는다
+    if paths:
+        win.open_paths(paths)
     QTimer.singleShot(1500, lambda: win.make_shortcut(first_run=True))  # 창이 뜬 뒤에
+    QTimer.singleShot(2500, win.show_whats_new)  # 새 버전으로 처음 켰으면 바뀐 내용을 보여 준다
     sys.exit(app.exec())
 
 
