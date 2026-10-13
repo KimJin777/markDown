@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import html
 import json
 import os
@@ -24,6 +25,7 @@ from PySide6.QtGui import (
     QKeySequence,
     QPageLayout,
     QPageSize,
+    QTextCharFormat,
     QTextCursor,
     QTextDocument,
 )
@@ -44,6 +46,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QStyle,
+    QTextEdit,
     QToolBar,
     QToolButton,
     QTreeWidget,
@@ -81,6 +84,8 @@ PREVIEW_JS = """
 body.toc-on #toc { display: block; }
 body.toc-on #content { margin-left: 250px; }
 #content img { cursor: zoom-in; }
+#content .md-changed { color: #0550ae; background: #ddf4ff; box-shadow: -8px 0 0 #ddf4ff, -11px 0 0 #0969da; }
+#content .md-changed .md-changed { box-shadow: none; }
 #slides { display: none; position: fixed; inset: 0; z-index: 1000; background: #111; color: #e6edf3;
           flex-direction: column; user-select: none; }
 body.slides-on #slides { display: flex; }
@@ -110,9 +115,19 @@ const hush = () => { quietUntil = Date.now() + 200; };
 const blocks = () => Array.from(document.querySelectorAll('#content [data-line]'))
   .map(el => ({ n: +el.dataset.line, y: el.getBoundingClientRect().top + window.scrollY }));
 let totalLines = 1;  // 원본 줄 수(줄 표시가 없는 보기에서 비율 스크롤에 씀)
-function setContent(html, lines) {
-  hush(); totalLines = lines || 1; document.getElementById('content').innerHTML = html; buildToc();
+function setContent(html, lines, changed) {
+  hush(); totalLines = lines || 1; document.getElementById('content').innerHTML = html; buildToc(); markChanged(changed || []);
   if (slidesOn()) { slides = contentImages(); if (slides.length) showSlide(Math.min(si, slides.length - 1)); else closeSlides(); }
+}
+// 새로 불러와 바뀐 줄이 든 블록을 파란색으로(그 줄을 품은 가장 안쪽 블록 = 줄 번호가 그 줄 이하인 마지막 블록)
+function markChanged(changed) {
+  if (!changed.length) return;
+  const els = Array.from(document.querySelectorAll('#content [data-line]'));
+  for (const c of changed) {
+    let hit = null;
+    for (const el of els) if (+el.dataset.line <= c) hit = el;
+    if (hit) hit.classList.add('md-changed');
+  }
 }
 // 그림 슬라이드: 본문의 그림만 모아 한 장씩 크게 본다(그림을 누르면 그 그림부터)
 let slides = [], si = 0, wheelAt = 0;
@@ -290,6 +305,12 @@ def sort_docs(docs: list, mode: str, reverse: bool = False) -> list:
     return sorted(docs, key=keys[mode], reverse=reverse)
 
 
+def changed_lines(old: str, new: str) -> list[int]:
+    """새로 불러온 글에서 바뀌거나 새로 생긴 줄 번호(0부터). 지워지기만 한 줄은 보이지 않으니 빠진다."""
+    ops = difflib.SequenceMatcher(None, old.split("\n"), new.split("\n"), autojunk=False).get_opcodes()
+    return [j for tag, _i1, _i2, j1, j2 in ops if tag in ("replace", "insert") for j in range(j1, j2)]
+
+
 def add_root(roots: list[Path], folder: Path) -> list[Path]:
     """폴더 올리기로 생긴 트리 뿌리 목록. 이미 올린 폴더 안이면 그대로, 새 폴더가 올린 폴더들을 품으면 하나로 합친다."""
     if any(folder.is_relative_to(r) for r in roots):
@@ -355,6 +376,7 @@ class Doc:
     newline: str = "\n"
     stamp: tuple[float, int] | None = None  # 마지막으로 읽거나 쓴 때의 (고친 시각, 크기)
     changed_outside: bool = False  # 다른 프로그램이 파일을 바꿈 → [새로 불러오기](F5)를 기다리는 중
+    changed_lines: list[int] = field(default_factory=list)  # 새로 불러와서 바뀐 줄(파란색) — 여기서 고치면 지운다
 
     @property
     def name(self) -> str:
@@ -565,6 +587,7 @@ class MainWindow(QMainWindow):
         self.reload_timer = QTimer(self, singleShot=True, interval=300)  # 저장이 끝날 때까지 잠깐 기다린다
         self.reload_timer.timeout.connect(self._reload_changed)
         self._asking_reload = False
+        self._reloading = False  # 새로 불러와 본문을 바꾸는 중(내가 고친 것으로 치지 않음)
 
         self.roots: list[Path] = []  # 폴더 올리기로 올린 폴더(트리 뿌리)
         self._items: dict[int, QTreeWidgetItem] = {}  # id(문서) → 목록 칸
@@ -596,6 +619,8 @@ class MainWindow(QMainWindow):
         self.files.itemExpanded.connect(lambda it: self._on_folder_toggled(it, True))
         self.files.itemCollapsed.connect(lambda it: self._on_folder_toggled(it, False))
         self.files.filesDropped.connect(self.open_paths)
+        self.files.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.files.customContextMenuRequested.connect(self._files_menu)
         self.editor.textChanged.connect(self._on_text_changed)
         self.editor.verticalScrollBar().valueChanged.connect(self.sync_scroll)
         self.preview_page.openMarkdown.connect(lambda p: self.open_paths([p]))
@@ -663,6 +688,9 @@ class MainWindow(QMainWindow):
         self.auto_reload_action.setChecked(self.settings.value("autoReload", False, type=bool))
         self.auto_reload_action.toggled.connect(self._on_auto_reload_toggled)
         v.addAction(self.auto_reload_action)
+        v.addSeparator()
+        act(v, "폴더 모두 펼치기", lambda: self.expand_folders(True))  # 목록에서 누른 폴더(없으면 모든 폴더)
+        act(v, "폴더 모두 접기", lambda: self.expand_folders(False))
 
         # 모두선택: 누를 때마다 목록 전체 체크 ↔ 전체 해제(토글). 버튼은 '모두 체크됨'일 때 눌린 모양
         self.select_all_action = QAction("모두선택", self, checkable=True)
@@ -866,6 +894,7 @@ class MainWindow(QMainWindow):
         doc.qdoc.setDocumentLayout(QPlainTextDocumentLayout(doc.qdoc))
         doc.qdoc.setDefaultFont(self.editor.font())
         doc.qdoc.contentsChanged.connect(lambda d=doc: self._refresh_item(d))
+        doc.qdoc.contentsChanged.connect(lambda d=doc: self._on_doc_edited(d))
         self.docs.append(doc)
         self._watch(doc)
         self._apply_sort()
@@ -916,6 +945,37 @@ class MainWindow(QMainWindow):
         if path := item.data(0, Qt.ItemDataRole.UserRole + 1):  # 접은 폴더는 다시 그려도 접힌 채로
             (self._collapsed.discard if expanded else self._collapsed.add)(path)
 
+    @staticmethod
+    def _is_folder(item: QTreeWidgetItem | None) -> bool:
+        return item is not None and bool(item.data(0, Qt.ItemDataRole.UserRole + 1))
+
+    def _set_expanded_tree(self, item: QTreeWidgetItem, on: bool) -> None:
+        """폴더 칸과 그 안의 하위 폴더를 모두 펼치거나 접는다(접은 상태는 _collapsed에 기억됨)."""
+        if self._is_folder(item):
+            item.setExpanded(on)
+        for i in range(item.childCount()):
+            self._set_expanded_tree(item.child(i), on)
+
+    def expand_folders(self, on: bool, item: QTreeWidgetItem | None = None) -> None:
+        """고른 폴더(목록에서 누른 폴더)를 하위 폴더까지 모두 펼치기/접기. 폴더를 고르지 않았으면 모든 폴더."""
+        if item is None:
+            cur = self.files.currentItem()
+            item = cur if self._is_folder(cur) else self.files.invisibleRootItem()
+        self._set_expanded_tree(item, on)
+
+    def _files_menu(self, pos: QPoint) -> None:
+        """파일 목록 오른쪽 클릭: 폴더 펼치기·접기."""
+        item = self.files.itemAt(pos)
+        menu = QMenu(self)
+        if self._is_folder(item):
+            menu.addAction("이 폴더 모두 펼치기(하위 폴더까지)", lambda: self.expand_folders(True, item))
+            menu.addAction("이 폴더 모두 접기(하위 폴더까지)", lambda: self.expand_folders(False, item))
+            menu.addSeparator()
+        root = self.files.invisibleRootItem()
+        menu.addAction("모든 폴더 펼치기", lambda: self.expand_folders(True, root))
+        menu.addAction("모든 폴더 접기", lambda: self.expand_folders(False, root))
+        menu.exec(self.files.viewport().mapToGlobal(pos))
+
     def _on_item_changed(self, item: QTreeWidgetItem | None, _prev) -> None:
         if item is None:
             return
@@ -931,6 +991,7 @@ class MainWindow(QMainWindow):
         )
         self.editor.setFocus()
         self._refresh_item(doc)
+        self._show_changes()
         self.render_preview()
         self._update_status()
 
@@ -1165,9 +1226,48 @@ class MainWindow(QMainWindow):
                 return  # ↻ 표시는 남겨 둔다(나중에 F5로 다시 읽을 수 있게)
         doc.changed_outside = False
         doc.stamp = file_stamp(doc.path)
-        self._replace_text(doc, text, enc, newline)
+        old = doc.qdoc.toPlainText()
+        self._reloading = True
+        try:
+            self._replace_text(doc, text, enc, newline)
+        finally:
+            self._reloading = False
+        doc.changed_lines = changed_lines(old, text)
+        if doc is self.current:
+            self._show_changes()
+            self.render_preview()
         self._apply_sort()  # '고친 시각' 정렬이면 자리가 바뀐다
-        self.statusBar().showMessage(f"파일을 새로 불러왔습니다: {doc.name}", 5000)
+        n = len(doc.changed_lines)
+        self.statusBar().showMessage(
+            f"파일을 새로 불러왔습니다: {doc.name}" + (f" — 바뀐 줄 {n}개를 파란색으로 표시" if n else ""), 8000
+        )
+
+    def _on_doc_edited(self, doc: Doc) -> None:
+        """여기서 고치기 시작하면(되돌리기 포함) 새로 불러온 표시(파란색)를 지운다 — 줄 번호가 어긋나므로."""
+        if self._reloading or not doc.changed_lines:
+            return
+        doc.changed_lines = []
+        if doc is self.current:
+            self._show_changes()
+
+    def _show_changes(self) -> None:
+        """편집기에서 새로 불러와 바뀐 줄을 파란색으로 칠한다(뷰어는 render_preview가 칠함)."""
+        sels = []
+        doc = self.current
+        if doc is not None and doc.changed_lines and not doc.is_pdf:
+            fmt = QTextCharFormat()
+            fmt.setBackground(QColor("#ddf4ff"))
+            fmt.setForeground(QColor("#0550ae"))
+            fmt.setProperty(QTextCharFormat.Property.FullWidthSelection, True)
+            for n in doc.changed_lines:
+                block = doc.qdoc.findBlockByNumber(n)
+                if not block.isValid():
+                    continue
+                sel = QTextEdit.ExtraSelection()
+                sel.format = fmt
+                sel.cursor = QTextCursor(block)
+                sels.append(sel)
+        self.editor.setExtraSelections(sels)
 
     def _replace_text(self, doc: Doc, text: str, enc: str, newline: str) -> None:
         """본문을 새 내용으로 갈아 끼운다. 되돌리기(Ctrl+Z)가 되고, 보던 위치·커서는 그대로."""
@@ -1397,7 +1497,8 @@ class MainWindow(QMainWindow):
         else:
             body = render_any(self.current.qdoc.toPlainText(), self.current.base_dir, self.current.kind)
         lines = self.current.qdoc.blockCount()
-        self.preview_page.runJavaScript(f"setContent({json.dumps(body)}, {lines});")
+        changed = json.dumps(self.current.changed_lines)
+        self.preview_page.runJavaScript(f"setContent({json.dumps(body)}, {lines}, {changed});")
         self.sync_scroll()
 
     def _show_pdf(self, path: Path, reload: bool = False) -> None:
