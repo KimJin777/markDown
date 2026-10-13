@@ -391,6 +391,7 @@ class Doc:
     stamp: tuple[float, int] | None = None  # 마지막으로 읽거나 쓴 때의 (고친 시각, 크기)
     changed_outside: bool = False  # 다른 프로그램이 파일을 바꿈 → [새로 불러오기](F5)를 기다리는 중
     changed_lines: list[int] = field(default_factory=list)  # 새로 불러와서 바뀐 줄(파란색) — 여기서 고치면 지운다
+    reloaded: bool = False  # 바뀐 파일을 새로 불러왔고 아직 [검토완료] 전 → 목록에 ↻(파란색)
 
     @property
     def name(self) -> str:
@@ -897,13 +898,16 @@ class MainWindow(QMainWindow):
     def _refresh_item(self, doc: Doc) -> None:
         item = self._item_of(doc)
         if item:
-            mark = ("● " if doc.dirty else "") + ("↻ " if doc.changed_outside else "")
+            mark = ("● " if doc.dirty else "") + ("↻ " if doc.changed_outside or doc.reloaded else "")
             item.setText(0, mark + doc.name)
             tip = str(doc.path) if doc.path else "저장하지 않은 새 문서"
             if doc.changed_outside:
                 tip += "\n다른 프로그램에서 바뀌었습니다 — 새로 불러오기(F5)"
+            elif doc.reloaded:
+                tip += "\n바뀐 내용을 새로 불러왔습니다(바뀐 부분은 파란색) — 다 봤으면 [검토완료](Ctrl+F5)"
             item.setToolTip(0, tip)
-            item.setForeground(0, QColor("#bc4c00") if doc.changed_outside else self.files.palette().text())
+            color = "#bc4c00" if doc.changed_outside else "#0969da" if doc.reloaded else None  # 주황: 읽기 전, 파랑: 읽음·검토 전
+            item.setForeground(0, QColor(color) if color else self.files.palette().text())
         if doc is self.current:
             self.setWindowTitle(f"{doc.name}{' *' if doc.dirty else ''} — mdEditor v{__version__}")
             self.reload_action.setEnabled(doc.changed_outside)
@@ -1252,6 +1256,8 @@ class MainWindow(QMainWindow):
         finally:
             self._reloading = False
         doc.changed_lines = changed_lines(old, text)
+        doc.reloaded = doc.reloaded or text != old  # 자동으로 다시 읽어도 목록에 ↻가 남아 바뀐 파일임을 안다
+        self._refresh_item(doc)
         if doc is self.current:
             self._show_changes()
             self.render_preview()
@@ -1287,14 +1293,16 @@ class MainWindow(QMainWindow):
                 sel.cursor = QTextCursor(block)
                 sels.append(sel)
         self.editor.setExtraSelections(sels)
-        self.reviewed_action.setEnabled(bool(sels))
+        self.reviewed_action.setEnabled(bool(sels) or (doc is not None and doc.reloaded))
 
     def mark_reviewed(self) -> None:
         """[검토완료]: 새로 불러와 바뀐 부분(파란색)을 다 봤다 — 편집기·뷰어 모두 보통 색으로."""
         doc = self.current
-        if doc is None or not doc.changed_lines:
+        if doc is None or not (doc.changed_lines or doc.reloaded):
             return
         doc.changed_lines = []
+        doc.reloaded = False
+        self._refresh_item(doc)
         self._show_changes()
         self.render_preview()
         self.statusBar().showMessage(f"비교 검토 완료: {doc.name}", 3000)
