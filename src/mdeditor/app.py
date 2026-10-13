@@ -1793,8 +1793,8 @@ class MainWindow(QMainWindow):
 
     # ---------- 버전·변경 이력 ----------
     def show_changelog(self, text: str | None = None, title: str = "새 기능·변경 이력") -> None:
-        """변경 이력(CHANGELOG.md)을 뷰어와 같은 모양으로 보여 준다. text를 주면 그 부분만."""
-        text = changelog.read_changelog() if text is None else text
+        """변경 이력을 뷰어와 같은 모양으로 보여 준다(최근 두 버전까지). text를 주면 그 부분만."""
+        text = changelog.latest(changelog.read_changelog(), __version__) if text is None else text
         if not text.strip():
             QMessageBox.information(self, title, f"mdEditor v{__version__}\n변경 이력 파일을 찾지 못했습니다.")
             return
@@ -1808,10 +1808,6 @@ class MainWindow(QMainWindow):
         box.addWidget(view)
         buttons = QDialogButtonBox()
         buttons.addButton("닫기", QDialogButtonBox.ButtonRole.RejectRole)
-        if len(changelog.sections(text)) < len(changelog.sections(changelog.read_changelog())):  # 일부만 보는 중
-            buttons.addButton("전체 이력 보기", QDialogButtonBox.ButtonRole.ActionRole).clicked.connect(
-                lambda: (dlg.accept(), self.show_changelog())
-            )
         buttons.rejected.connect(dlg.reject)
         box.addWidget(buttons)
         dlg.exec()

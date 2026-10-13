@@ -34,10 +34,20 @@ def sections(text: str) -> list[tuple[str, str]]:
 
 
 def changes_since(text: str, last_seen: str | None, current: str) -> str:
-    """지난번에 본 버전(last_seen)보다 새롭고 지금 버전(current) 이하인 부분. 처음이면 지금 버전만."""
+    """지난번에 본 버전(last_seen)보다 새롭고 지금 버전(current) 이하인 부분(최근 SHOWN개까지). 처음이면 지금 버전만."""
     cur = version_key(current)
     low = version_key(last_seen) if last_seen else None
     picked = [
         body for v, body in sections(text) if version_key(v) <= cur and (version_key(v) == cur if low is None else version_key(v) > low)
     ]
-    return "\n\n".join(picked)
+    return "\n\n".join(picked[:SHOWN])
+
+
+SHOWN = 2  # 프로그램 안에서는 최근 두 버전까지만 보여 준다(전체 이력은 아이디어가 다 드러나므로)
+
+
+def latest(text: str, current: str, n: int = SHOWN) -> str:
+    """지금 버전(current) 이하에서 가장 최근 n개 버전의 이력."""
+    cur = version_key(current)
+    picked = [body for v, body in sections(text) if version_key(v) <= cur]
+    return "\n\n".join(picked[:n])

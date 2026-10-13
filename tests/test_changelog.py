@@ -1,4 +1,4 @@
-from mdeditor.changelog import changes_since, read_changelog, sections, version_key
+from mdeditor.changelog import changes_since, latest, read_changelog, sections, version_key
 
 TEXT = """# 변경 이력
 
@@ -30,6 +30,13 @@ def test_changes_since_last_seen():
     # 처음 실행(본 적 없음)이면 지금 버전만
     assert changes_since(TEXT, None, "0.6.0") == "## v0.6.0 — 2026-10-13\n\n- 트리"
     assert changes_since(TEXT, "0.7.0", "0.7.0") == ""
+
+
+def test_only_latest_two_versions_are_shown():
+    shown = latest(TEXT, "0.7.0")
+    assert "그림 슬라이드" in shown and "트리" in shown and "PDF 보기" not in shown
+    assert "PDF 보기" not in changes_since(TEXT, "0.4.0", "0.7.0")  # 오래 안 켰어도 최근 두 개까지
+    assert [v for v, _ in sections(latest(TEXT, "0.6.0"))] == ["0.6.0", "0.5.0"]
 
 
 def test_version_key_numeric():
