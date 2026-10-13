@@ -311,6 +311,20 @@ def changed_lines(old: str, new: str) -> list[int]:
     return [j for tag, _i1, _i2, j1, j2 in ops if tag in ("replace", "insert") for j in range(j1, j2)]
 
 
+REPO_URL = "https://github.com/KimJin777/markDown"
+
+
+def feature_request_url(version: str) -> str:
+    """GitHub '새 이슈' 쓰기 화면 주소(제목·본문 틀·버전을 미리 채움)."""
+    from urllib.parse import urlencode
+
+    body = (
+        "## 원하는 기능\n\n\n## 어떤 때 쓰려고 하나요\n\n\n"
+        f"---\nmdEditor v{version} · Windows {sys.getwindowsversion().build if sys.platform == 'win32' else ''}\n"
+    )
+    return f"{REPO_URL}/issues/new?" + urlencode({"title": "[기능 요청] ", "body": body, "labels": "enhancement"})
+
+
 def add_root(roots: list[Path], folder: Path) -> list[Path]:
     """폴더 올리기로 생긴 트리 뿌리 목록. 이미 올린 폴더 안이면 그대로, 새 폴더가 올린 폴더들을 품으면 하나로 합친다."""
     if any(folder.is_relative_to(r) for r in roots):
@@ -652,6 +666,9 @@ class MainWindow(QMainWindow):
         self.reload_action = act(f, "새로 불러오기", self.reload_current, "F5")
         self.reload_action.setToolTip("다른 프로그램에서 바뀐 파일(목록에 ↻)을 파일에서 다시 읽습니다 (F5)")
         self.reload_action.setEnabled(False)
+        self.reviewed_action = act(f, "비교 검토 완료", self.mark_reviewed, "Ctrl+F5")
+        self.reviewed_action.setToolTip("새로 불러와 바뀐 부분(파란색)을 다 봤으면 눌러 보통 색으로 돌립니다 (Ctrl+F5)")
+        self.reviewed_action.setEnabled(False)
         f.addSeparator()
         a_save = act(f, "저장", self.save_current, QKeySequence.StandardKey.Save)
         act(f, "다른 이름으로 저장...", self.save_current_as, "Ctrl+Shift+S")
@@ -726,6 +743,7 @@ class MainWindow(QMainWindow):
 
         h = self.menuBar().addMenu("도움말(&H)")
         act(h, "새 기능·변경 이력...", lambda: self.show_changelog())
+        act(h, "기능 추가 요청...", self.request_feature)
         act(h, "mdEditor 정보...", self.show_about)
 
         bar = self.addToolBar("도구")
@@ -736,6 +754,7 @@ class MainWindow(QMainWindow):
             (a_new, "새 파일"),
             (a_open, "파일 올리기"),
             (self.reload_action, "새로 불러오기"),
+            (self.reviewed_action, "검토완료"),
             (self.select_all_action, "모두선택"),
             (self.close_checked_action, "선택닫기"),
             ("sort", None),
@@ -1268,6 +1287,17 @@ class MainWindow(QMainWindow):
                 sel.cursor = QTextCursor(block)
                 sels.append(sel)
         self.editor.setExtraSelections(sels)
+        self.reviewed_action.setEnabled(bool(sels))
+
+    def mark_reviewed(self) -> None:
+        """[검토완료]: 새로 불러와 바뀐 부분(파란색)을 다 봤다 — 편집기·뷰어 모두 보통 색으로."""
+        doc = self.current
+        if doc is None or not doc.changed_lines:
+            return
+        doc.changed_lines = []
+        self._show_changes()
+        self.render_preview()
+        self.statusBar().showMessage(f"비교 검토 완료: {doc.name}", 3000)
 
     def _replace_text(self, doc: Doc, text: str, enc: str, newline: str) -> None:
         """본문을 새 내용으로 갈아 끼운다. 되돌리기(Ctrl+Z)가 되고, 보던 위치·커서는 그대로."""
@@ -1874,6 +1904,19 @@ class MainWindow(QMainWindow):
             "mdEditor를 .md 파일의 '연결 프로그램'에서 뺐습니다.\n"
             "기본 앱으로 골라 두었다면 Windows 설정 → 앱 → 기본 앱에서 다른 프로그램을 고르세요.",
         )
+
+    def request_feature(self) -> None:
+        """도움말 → 기능 추가 요청: 저장소의 GitHub 이슈 쓰기 화면을 연다(따로 DB 없이 요청이 한곳에 모임)."""
+        r = QMessageBox.information(
+            self,
+            "기능 추가 요청",
+            "웹 브라우저에서 mdEditor 저장소(GitHub)의 '새 이슈' 쓰기 화면을 엽니다.\n"
+            "제목과 내용을 적고 [Submit new issue]를 누르면 요청이 접수됩니다.\n"
+            "(GitHub 계정으로 로그인해야 합니다. 버전 정보는 미리 채워 둡니다.)",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+        )
+        if r == QMessageBox.StandardButton.Ok:
+            QDesktopServices.openUrl(QUrl(feature_request_url(__version__)))
 
     def receive_paths(self, paths: list[str]) -> None:
         """다른 곳에서 mdEditor를 또 실행함(.md 더블클릭 등): 새 창 대신 이 창에 올리고 앞으로 나온다."""
