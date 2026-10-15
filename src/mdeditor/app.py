@@ -61,7 +61,7 @@ from PySide6.QtWidgets import (
 
 from mdeditor import __version__
 from mdeditor.fmt import blank, find_all, insert_text, locate_in_source, next_match, py_to_q, q_to_py, set_heading, set_size, toggle_wrap
-from mdeditor import changelog, fileassoc, pdf2md, shortcut, single, symbols
+from mdeditor import changelog, fileassoc, pdf2md, shortcut, single, symbols, update
 from mdeditor.render import kind_of, page, print_document, render_any
 
 MD_SUFFIXES = {".md", ".markdown", ".mdown", ".txt", ".json", ".yaml", ".yml", ".csv", ".tsv", ".pdf"}
@@ -834,6 +834,7 @@ class MainWindow(QMainWindow):
 
         h = self.menuBar().addMenu("도움말(&H)")
         act(h, "새 기능·변경 이력...", lambda: self.show_changelog())
+        act(h, "업데이트 확인...", self.check_update)
         act(h, "기능 추가 요청...", self.request_feature)
         act(h, "mdEditor 정보...", self.show_about)
 
@@ -2196,6 +2197,47 @@ class MainWindow(QMainWindow):
             "mdEditor를 .md 파일의 '연결 프로그램'에서 뺐습니다.\n"
             "기본 앱으로 골라 두었다면 Windows 설정 → 앱 → 기본 앱에서 다른 프로그램을 고르세요.",
         )
+
+    def check_update(self) -> None:
+        """도움말 → 업데이트 확인: 새 버전이 있으면 바뀐 내용을 보여 주고, 원하면 닫은 뒤 업데이트하고 다시 켠다."""
+        title = "업데이트 확인"
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            latest, notes = update.check(__version__)
+        except OSError as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, title, f"새 버전을 확인하지 못했습니다(인터넷 연결을 확인하세요).\n\n{e}")
+            return
+        QApplication.restoreOverrideCursor()
+        if not update.is_newer(latest, __version__):
+            QMessageBox.information(self, title, f"지금 최신 버전입니다 (v{__version__}).")
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle(title)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(f"<b>새 버전 v{latest}이 있습니다.</b> (지금 v{__version__})")
+        box.setTextFormat(Qt.TextFormat.RichText)
+        notes = re.sub(r"^## (.+)$", r"**\1**", notes, flags=re.M)  # 상자 안에서는 버전 제목을 작게
+        notes_html = render_any(notes, None, "md") if notes else ""  # 바뀐 내용(최근 두 버전까지)
+        kind, uv = update.install_kind(), update.find_uv()
+        if kind == "uv" and uv is not None:
+            box.setInformativeText(
+                notes_html + "<p>[지금 업데이트]를 누르면 mdEditor를 닫고 새 버전을 받은 뒤 다시 켭니다"
+                "(명령 창이 잠깐 뜹니다).<br>저장하지 않은 문서가 있으면 먼저 묻습니다.</p>"
+            )
+            go = box.addButton("지금 업데이트", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton("나중에", QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() is go and self.close():  # 닫기를 취소하면(저장 묻기에서 취소) 업데이트도 안 함
+                update.start_updater(uv, shortcut.launcher_path())
+            return
+        how = {
+            "exe": f"실행 파일 배포본은 저장소에서 새로 받아 주세요:<br>https://github.com/{update.REPO}",
+            "dev": "개발용 실행입니다. 저장소에서 git pull 하세요.",
+        }.get(kind, f"mdEditor를 닫고 PowerShell에서 실행하세요:<br><code>uv tool upgrade {update.PACKAGE}</code>")
+        box.setInformativeText(notes_html + f"<p>{how}</p>")
+        box.addButton("닫기", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
 
     def request_feature(self) -> None:
         """도움말 → 기능 추가 요청: 저장소의 GitHub 이슈 쓰기 화면을 연다(따로 DB 없이 요청이 한곳에 모임)."""

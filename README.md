@@ -15,7 +15,7 @@ Windows용 마크다운 편집기. 세 칸 [파일 목록 | 원본 | 뷰어]로 
    특정 버전: 주소 끝에 `@v0.3.0`
 3. 실행: 명령창에서 `mdEditor` (파일을 붙이면 그 파일을 연다: `mdEditor 문서.md`)
    **처음 실행할 때 바탕화면에 `mdEditor` 바로가기가 생긴다.** 지웠으면 메뉴 파일 → 바탕화면에 바로가기 만들기.
-4. 업데이트 `uv tool upgrade markdown-editor` / 삭제 `uv tool uninstall markdown-editor`
+4. 업데이트: 프로그램에서 도움말 → 업데이트 확인(새 버전이 있으면 [지금 업데이트]로 닫고 받아 다시 켬), 또는 `uv tool upgrade markdown-editor` / 삭제 `uv tool uninstall markdown-editor`
 
 ## 주요 기능
 
