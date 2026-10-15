@@ -90,6 +90,16 @@ body.toc-on #content { margin-left: 250px; }
 #content img { cursor: zoom-in; }
 #content .md-changed { color: #0550ae; background: #ddf4ff; box-shadow: -8px 0 0 #ddf4ff, -11px 0 0 #0969da; }
 #content .md-changed .md-changed { box-shadow: none; }
+/* A4 쪽 선: 본문 폭을 인쇄 폭(A4 − 좌우 여백)으로 맞추고 여백은 흰 테두리로, 쪽이 끝나는 곳에 점선 */
+body.a4-on { background: #e9ecef; padding: calc(15mm + 12px); }
+body.a4-on #content { width: 180mm; position: relative; background: #fff;
+                      box-shadow: 0 0 0 15mm #fff, 0 0 0 calc(15mm + 1px) #c8ccd0; }
+body.a4-on.toc-on #content { margin-left: calc(250px + 15mm); }
+body.a4-on pre { white-space: pre-wrap; }
+.a4-line { position: absolute; left: -15mm; right: -15mm; height: 0; border-top: 2px dashed #e5534b;
+           pointer-events: none; user-select: none; z-index: 5; }
+.a4-line span { position: absolute; right: 4px; top: -18px; font-size: 11px; line-height: 16px; color: #cf222e;
+                background: #fff; padding: 0 4px; }
 #slides { display: none; position: fixed; inset: 0; z-index: 1000; background: #111; color: #e6edf3;
           flex-direction: column; user-select: none; }
 body.slides-on #slides { display: flex; }
@@ -122,7 +132,30 @@ let totalLines = 1;  // 원본 줄 수(줄 표시가 없는 보기에서 비율 
 function setContent(html, lines, changed) {
   hush(); totalLines = lines || 1; document.getElementById('content').innerHTML = html; buildToc(); markChanged(changed || []);
   if (slidesOn()) { slides = contentImages(); if (slides.length) showSlide(Math.min(si, slides.length - 1)); else closeSlides(); }
+  guideH = -1; drawGuide();
 }
+// A4 쪽 선: 인쇄는 쪽마다 A4 높이 − 위아래 여백(297 − 30 = 267mm)씩 담는다. 인쇄처럼 맨 위에 파일 이름 줄도 넣는다.
+// 그림·표 줄은 쪽 사이에서 잘리지 않고 다음 쪽으로 넘어가므로 실제 쪽 나눔은 선보다 조금 앞설 수 있다.
+const PAGE_H = 267 * 96 / 25.4;  // mm → CSS px
+let guideOn = false, guideTitle = '', guideH = -1;
+function setGuide(on, title) {
+  guideOn = on; guideTitle = title || ''; document.body.classList.toggle('a4-on', on); guideH = -1; drawGuide();
+}
+function drawGuide() {
+  const c = document.getElementById('content');
+  c.querySelectorAll(':scope > .a4-line, :scope > .a4-title').forEach(e => e.remove());
+  if (!guideOn) return;
+  const t = document.createElement('div'); t.className = 'file-title a4-title'; t.textContent = guideTitle; c.prepend(t);
+  const h = c.scrollHeight;
+  for (let k = 1; k * PAGE_H < h; k++) {
+    const ln = document.createElement('div'); ln.className = 'a4-line'; ln.style.top = (k * PAGE_H) + 'px';
+    ln.innerHTML = `<span>${k}쪽 끝 · ${k + 1}쪽 시작</span>`; c.appendChild(ln);
+  }
+  guideH = h;
+}
+new ResizeObserver(() => {  // 그림이 늦게 뜨거나 창 크기가 바뀌면 다시 그린다
+  if (guideOn && document.getElementById('content').scrollHeight !== guideH) drawGuide();
+}).observe(document.getElementById('content'));
 // 새로 불러와 바뀐 줄이 든 블록을 파란색으로(그 줄을 품은 가장 안쪽 블록 = 줄 번호가 그 줄 이하인 마지막 블록)
 function markChanged(changed) {
   if (!changed.length) return;
@@ -611,6 +644,15 @@ class MainWindow(QMainWindow):
         self.fullscreen_action.toggled.connect(self._on_fullscreen_toggled)
         self.addAction(self.fullscreen_action)  # 메뉴 줄을 숨겨도 F11이 듣게
 
+        # A4 쪽 선: 뷰어 폭을 인쇄 폭에 맞추고 쪽이 끝나는 곳에 점선(인쇄는 A4·여백 15mm)
+        self.a4_action = QAction("A4 쪽 선", self, checkable=True)
+        self.a4_action.setToolTip(
+            "뷰어를 A4 인쇄 폭(여백 15mm)으로 맞추고 쪽이 끝나는 곳에 빨간 점선을 그립니다\n"
+            "그림·표 줄은 쪽 사이에서 잘리지 않고 다음 쪽으로 넘어가므로 실제 쪽 나눔은 선보다 조금 앞설 수 있습니다"
+        )
+        self.a4_action.setChecked(self.settings.value("a4Guide", False, type=bool))
+        self.a4_action.toggled.connect(self._on_a4_toggled)
+
         # 소스: 끄면 원본 편집기를 숨기고 뷰어만 본다
         self.source_action = QAction("소스", self, checkable=True)
         self.source_action.setToolTip("원본(소스) 창을 보이거나 숨깁니다 — 끄면 뷰어만 보입니다 (Ctrl+Shift+E)")
@@ -744,6 +786,7 @@ class MainWindow(QMainWindow):
         v.addAction(self.source_action)
         v.addAction(self.toc_action)
         v.addAction(self.sync_action)
+        v.addAction(self.a4_action)
         v.addSeparator()
         v.addAction(self.slides_action)
         v.addAction(self.fullscreen_action)
@@ -898,6 +941,7 @@ class MainWindow(QMainWindow):
         bar.addAction(self.source_action)
         bar.addAction(self.toc_action)
         bar.addAction(self.sync_action)
+        bar.addAction(self.a4_action)
         bar.addSeparator()
         bar.addAction(self.slides_action)
         bar.addAction(self.fullscreen_action)
@@ -1747,6 +1791,10 @@ class MainWindow(QMainWindow):
         if self._preview_ready:
             self.preview_page.runJavaScript(f"setToc({'true' if on else 'false'});")
 
+    def _on_a4_toggled(self, on: bool) -> None:
+        self.settings.setValue("a4Guide", on)
+        self.render_preview()
+
     def _on_text_changed(self) -> None:
         self.render_timer.start()
 
@@ -1769,7 +1817,10 @@ class MainWindow(QMainWindow):
             body = render_any(self.current.qdoc.toPlainText(), self.current.base_dir, self.current.kind)
         lines = self.current.qdoc.blockCount()
         changed = json.dumps(self.current.changed_lines)
-        self.preview_page.runJavaScript(f"setContent({json.dumps(body)}, {lines}, {changed});")
+        guide = "true" if self.a4_action.isChecked() and not self.current.is_text else "false"
+        self.preview_page.runJavaScript(
+            f"setGuide({guide}, {json.dumps(self.current.name)}); setContent({json.dumps(body)}, {lines}, {changed});"
+        )
         self.sync_scroll()
 
     def _show_pdf(self, path: Path, reload: bool = False) -> None:
