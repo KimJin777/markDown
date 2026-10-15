@@ -34,10 +34,13 @@ from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QGridLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -46,6 +49,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QStyle,
+    QTabWidget,
     QTextEdit,
     QToolBar,
     QToolButton,
@@ -56,13 +60,13 @@ from PySide6.QtWidgets import (
 )
 
 from mdeditor import __version__
-from mdeditor.fmt import locate_in_source, py_to_q, q_to_py, set_heading, set_size, toggle_wrap
-from mdeditor import changelog, fileassoc, pdf2md, shortcut, single
+from mdeditor.fmt import blank, find_all, insert_text, locate_in_source, next_match, py_to_q, q_to_py, set_heading, set_size, toggle_wrap
+from mdeditor import changelog, fileassoc, pdf2md, shortcut, single, symbols
 from mdeditor.render import kind_of, page, print_document, render_any
 
-MD_SUFFIXES = {".md", ".markdown", ".mdown", ".txt", ".json", ".yaml", ".yml", ".pdf"}
-MD_FILTER = "읽을 수 있는 파일 (*.md *.markdown *.mdown *.txt *.json *.yaml *.yml *.pdf);;마크다운 (*.md *.markdown *.mdown);;텍스트 (*.txt);;JSON (*.json);;YAML (*.yaml *.yml);;PDF (*.pdf);;모든 파일 (*)"
-SAVE_FILTER = "마크다운 (*.md *.markdown *.mdown);;텍스트 (*.txt);;JSON (*.json);;YAML (*.yaml *.yml);;모든 파일 (*)"
+MD_SUFFIXES = {".md", ".markdown", ".mdown", ".txt", ".json", ".yaml", ".yml", ".csv", ".tsv", ".pdf"}
+MD_FILTER = "읽을 수 있는 파일 (*.md *.markdown *.mdown *.txt *.json *.yaml *.yml *.csv *.tsv *.pdf);;마크다운 (*.md *.markdown *.mdown);;텍스트 (*.txt);;JSON (*.json);;YAML (*.yaml *.yml);;CSV (*.csv *.tsv);;PDF (*.pdf);;모든 파일 (*)"
+SAVE_FILTER = "마크다운 (*.md *.markdown *.mdown);;텍스트 (*.txt);;JSON (*.json);;YAML (*.yaml *.yml);;CSV (*.csv *.tsv);;모든 파일 (*)"
 ICON = Path(__file__).with_name("icon.ico")
 
 # 파일 목록 정렬: (설정값, 메뉴 글자)
@@ -399,7 +403,7 @@ class Doc:
 
     @property
     def kind(self) -> str:
-        """'md' | 'txt' | 'json' | 'yaml' | 'pdf' — 뷰어가 어떻게 보여 줄지."""
+        """'md' | 'txt' | 'json' | 'yaml' | 'csv' | 'tsv' | 'pdf' — 뷰어가 어떻게 보여 줄지."""
         return kind_of(self.path)
 
     @property
@@ -532,6 +536,38 @@ class PreviewPage(QWebEnginePage):
         return False
 
 
+class SymbolDialog(QDialog):
+    """특수기호 창: 누르면 커서 자리에 들어가고 창은 열려 있다(여러 개를 잇달아 넣기)."""
+
+    COLS = 12
+
+    def __init__(self, on_pick, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("특수기호 넣기")
+        tabs = QTabWidget()
+        font = QFont("Malgun Gothic", 14)
+        for name, chars in symbols.GROUPS:
+            tab = QWidget()
+            grid = QGridLayout(tab)
+            grid.setSpacing(2)
+            for i, ch in enumerate(chars):
+                b = QToolButton()
+                b.setText(ch)
+                b.setFont(font)
+                b.setFixedSize(38, 38)
+                b.setToolTip(f"{ch}  U+{ord(ch):04X}")
+                b.clicked.connect(lambda _c=False, c=ch: on_pick(c))
+                grid.addWidget(b, i // self.COLS, i % self.COLS)
+            grid.setRowStretch(grid.rowCount(), 1)
+            tabs.addTab(tab, name)
+        box = QVBoxLayout(self)
+        box.addWidget(tabs)
+        box.addWidget(QLabel("누르면 원본의 커서 자리에 들어갑니다. 창은 닫을 때까지 열려 있습니다."))
+        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close.rejected.connect(self.close)
+        box.addWidget(close)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -544,6 +580,7 @@ class MainWindow(QMainWindow):
         self._print_jobs: list[QWebEngineView] = []  # 인쇄·PDF가 끝날 때까지 살려 둘 화면 밖 뷰
         self._from_preview = False  # 뷰어 스크롤을 편집기에 옮기는 중(되돌려 보내지 않음)
         self._last_pane = "editor"  # 서식 버튼이 쓸 선택: 마지막으로 누른 칸(편집기/뷰어)
+        self._symbols: SymbolDialog | None = None  # 특수기호 창(한 번 만들어 두고 다시 씀)
         QApplication.instance().focusChanged.connect(self._on_focus_changed)
 
         # 동시보기: 켜면 편집기·뷰어 어느 쪽을 스크롤해도 다른 쪽이 같은 위치로 따라온다
@@ -644,6 +681,7 @@ class MainWindow(QMainWindow):
         self.preview.loadFinished.connect(self._on_preview_loaded)
 
         self._build_menu()
+        self._build_find_bar()
         self._build_status()
         self.preview.setHtml(page("<div id='content'></div>", script=PREVIEW_JS), QUrl.fromLocalFile(str(Path.home()) + "/"))
         self._restore()
@@ -692,6 +730,15 @@ class MainWindow(QMainWindow):
         act(f, ".md 파일 연결 등록 해제", self.unregister_file_assoc)
         f.addSeparator()
         act(f, "끝내기", self.close, "Ctrl+Q")
+
+        e = self.menuBar().addMenu("편집(&E)")
+        act(e, "찾기...", lambda: self.show_find(False), QKeySequence.StandardKey.Find)
+        act(e, "바꾸기...", lambda: self.show_find(True), "Ctrl+H")
+        act(e, "다음 찾기", lambda: self.find_next(False), "F3")
+        act(e, "이전 찾기", lambda: self.find_next(True), "Shift+F3")
+        e.addSeparator()
+        e.addAction(self.symbol_action)
+        e.addMenu(self.blank_menu)
 
         v = self.menuBar().addMenu("보기(&V)")
         v.addAction(self.source_action)
@@ -819,6 +866,35 @@ class MainWindow(QMainWindow):
         fmt_action("밑줄", "밑줄", "<u>", "</u>", "Ctrl+U", under=True)
         fmt_action("취소선", "취소선", "~~", None, None, strike=True)
         bar.addSeparator()
+
+        # 빈칸: 마크다운은 빈칸을 하나로 줄이므로 &emsp;로 넣는다. 선택한 글자가 있으면 그 자리를 빈칸으로(문제 만들기)
+        self.blank_menu = QMenu("빈칸 넣기", self)
+        for label, width, under in (
+            ("밑줄 빈칸 — 짧게", 3, True),
+            ("밑줄 빈칸 — 보통", 6, True),
+            ("밑줄 빈칸 — 길게", 12, True),
+            ("빈칸(밑줄 없음) — 1칸", 1, False),
+            ("빈칸(밑줄 없음) — 4칸", 4, False),
+        ):
+            self.blank_menu.addAction(label, lambda w=width, u=under: self.insert(blank(w, u)))
+        self.blank_menu.addAction("괄호 빈칸 (    )", lambda: self.insert("(" + blank(4, False) + ")"))
+        blank_btn = QToolButton()
+        blank_btn.setText("빈칸")
+        blank_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        blank_btn.setMenu(self.blank_menu)
+        blank_btn.clicked.connect(lambda: self.insert(blank(6)))
+        blank_btn.setToolTip(
+            "커서 자리에 밑줄 빈칸(______)을 넣습니다 — ▾에서 길이·밑줄 없는 빈칸·괄호 빈칸\n"
+            "글자를 선택하고 누르면 그 글자 자리가 빈칸이 됩니다(빈칸 채우기 문제)"
+        )
+        bar.addWidget(blank_btn)
+
+        self.symbol_action = QAction("특수기호", self)
+        self.symbol_action.setShortcut("Ctrl+F10")
+        self.symbol_action.setToolTip("특수기호(※ ① → ± ℃ …)를 골라 커서 자리에 넣습니다 (Ctrl+F10)")
+        self.symbol_action.triggered.connect(self.show_symbols)
+        bar.addAction(self.symbol_action)
+        bar.addSeparator()
         bar.addAction(self.source_action)
         bar.addAction(self.toc_action)
         bar.addAction(self.sync_action)
@@ -833,6 +909,161 @@ class MainWindow(QMainWindow):
             self._last_pane = "editor"
         elif new is not None and (new is self.preview or self.preview.isAncestorOf(new)):
             self._last_pane = "preview"
+
+    def insert(self, new: str) -> None:
+        """커서 자리에 글자를 넣는다(선택한 글자가 있으면 그것을 바꾼다)."""
+        self.apply_format(lambda t, s, e: insert_text(t, s, e, new))
+
+    def show_symbols(self) -> None:
+        if self._symbols is None:
+            self._symbols = SymbolDialog(self.insert, self)
+        self._symbols.show()
+        self._symbols.raise_()
+        self._symbols.activateWindow()
+
+    # ---------- 찾기·바꾸기(아래쪽 줄) ----------
+    def _build_find_bar(self) -> None:
+        bar = QToolBar("찾기", self)
+        bar.setObjectName("findbar")
+        bar.setMovable(False)
+        self.find_edit = QLineEdit(placeholderText="찾을 글자")
+        self.find_edit.setClearButtonEnabled(True)
+        self.find_edit.setMaximumWidth(260)
+        self.find_edit.textEdited.connect(lambda _t: self.find_next(False, from_start=True))
+        self.find_edit.returnPressed.connect(lambda: self.find_next(False))
+        self.replace_edit = QLineEdit(placeholderText="바꿀 글자")
+        self.replace_edit.setClearButtonEnabled(True)
+        self.replace_edit.setMaximumWidth(260)
+        self.replace_edit.returnPressed.connect(self.replace_one)
+        self.find_case = QCheckBox("대소문자")
+        self.find_word = QCheckBox("낱말 단위")
+        for box in (self.find_case, self.find_word):
+            box.toggled.connect(lambda _on: self.find_next(False, from_start=True))
+        self.find_count = QLabel()
+        self.find_count.setMinimumWidth(90)
+
+        bar.addWidget(QLabel(" 찾기 "))
+        bar.addWidget(self.find_edit)
+        bar.addAction("◀ 이전", lambda: self.find_next(True)).setToolTip("이전 찾기 (Shift+F3)")
+        bar.addAction("다음 ▶", lambda: self.find_next(False)).setToolTip("다음 찾기 (Enter, F3)")
+        bar.addWidget(self.find_case)
+        bar.addWidget(self.find_word)
+        bar.addWidget(self.find_count)
+        bar.addSeparator()
+        one = bar.addAction("바꾸기", self.replace_one)
+        one.setToolTip("찾은 곳 하나를 바꾸고 다음으로 (Enter)")
+        every = bar.addAction("모두 바꾸기", self.replace_all)
+        every.setToolTip("문서 안의 모든 곳을 한 번에 바꿉니다 — Ctrl+Z 한 번으로 되돌림")
+        self._replace_widgets = [bar.insertWidget(one, QLabel(" 바꾸기 ")), bar.insertWidget(one, self.replace_edit), one, every]
+        bar.addSeparator()
+        bar.addAction("닫기", self.hide_find).setToolTip("찾기 줄 닫기 (Esc)")
+        esc = QAction(bar)
+        esc.setShortcut("Esc")
+        esc.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        esc.triggered.connect(self.hide_find)
+        bar.addAction(esc)
+        self.addToolBar(Qt.ToolBarArea.BottomToolBarArea, bar)
+        bar.hide()
+        self.find_bar = bar
+
+    def _find_in_editor(self) -> bool:
+        """원본 창에서 찾을지(아니면 뷰어에서). 원본을 숨겼거나 PDF면 뷰어에서 찾는다(바꾸기는 안 됨)."""
+        return self.current is not None and not self.current.is_pdf and self.editor.isVisible()
+
+    def _view(self) -> QWebEngineView:
+        return self.pdf_view if self.current is not None and self.current.is_pdf else self.preview
+
+    def show_find(self, replace: bool) -> None:
+        """찾기(Ctrl+F)·바꾸기(Ctrl+H) 줄을 연다. 원본에서 한 줄 안의 글자를 골라 두었으면 그것을 찾는다."""
+        self.find_bar.show()
+        can_replace = self._find_in_editor()
+        for a in self._replace_widgets:
+            a.setVisible(can_replace)
+        sel = self.editor.textCursor().selectedText() if can_replace else ""
+        if sel and " " not in sel:
+            self.find_edit.setText(sel)
+        target = self.replace_edit if replace and can_replace and self.find_edit.text() else self.find_edit
+        target.setFocus()
+        target.selectAll()
+        if self.find_edit.text():
+            self.find_next(False, from_start=True)
+
+    def hide_find(self) -> None:
+        self.find_bar.hide()
+        self._view().findText("")  # 뷰어의 찾기 표시 지우기
+        if self._find_in_editor():
+            self.editor.setFocus()
+
+    def _spans(self, text: str) -> list[tuple[int, int]]:
+        return find_all(text, self.find_edit.text(), self.find_case.isChecked(), self.find_word.isChecked())
+
+    def _show_found(self, ok: bool, msg: str) -> None:
+        self.find_count.setText(msg)
+        self.find_edit.setStyleSheet("" if ok or not self.find_edit.text() else "QLineEdit { background: #ffebe9; }")
+
+    def find_next(self, back: bool = False, from_start: bool = False) -> None:
+        """다음(back이면 이전) 찾은 곳을 고른다. from_start: 지금 고른 곳부터 다시 찾는다(찾을 글자를 고칠 때)."""
+        if not self.find_bar.isVisible():
+            self.show_find(False)
+            return
+        query = self.find_edit.text()
+        if not query:
+            self._show_found(True, "")
+            return
+        if not self._find_in_editor():  # 뷰어(또는 PDF)에서 찾기
+            flags = QWebEnginePage.FindFlag(0)
+            if back:
+                flags |= QWebEnginePage.FindFlag.FindBackward
+            if self.find_case.isChecked():
+                flags |= QWebEnginePage.FindFlag.FindCaseSensitively
+            self._view().findText(
+                query, flags, lambda r: self._show_found(r.numberOfMatches() > 0, f"{r.activeMatch()}/{r.numberOfMatches()}" if r.numberOfMatches() else "없음")
+            )
+            return
+        text = self.current.qdoc.toPlainText()
+        spans = self._spans(text)
+        cur = self.editor.textCursor()
+        s, e = q_to_py(text, cur.selectionStart()), q_to_py(text, cur.selectionEnd())
+        i = next_match(spans, s if (back or from_start) else e, back)
+        if i is None:
+            self._show_found(False, "없음")
+            return
+        ms, me = spans[i]
+        cur.setPosition(py_to_q(text, ms))
+        cur.setPosition(py_to_q(text, me), QTextCursor.MoveMode.KeepAnchor)
+        self.editor.setTextCursor(cur)
+        self.editor.centerCursor()
+        self._show_found(True, f"{i + 1}/{len(spans)}")
+
+    def replace_one(self) -> None:
+        """고른 곳이 찾은 글자면 바꾸고, 다음 찾은 곳으로 간다."""
+        if not self._find_in_editor() or not self.find_edit.text():
+            return
+        text = self.current.qdoc.toPlainText()
+        cur = self.editor.textCursor()
+        if (q_to_py(text, cur.selectionStart()), q_to_py(text, cur.selectionEnd())) in self._spans(text):
+            cur.insertText(self.replace_edit.text())
+            self.editor.setTextCursor(cur)
+        self.find_next(False)
+
+    def replace_all(self) -> None:
+        if not self._find_in_editor() or not self.find_edit.text():
+            return
+        text = self.current.qdoc.toPlainText()
+        spans = self._spans(text)
+        if not spans:
+            self._show_found(False, "없음")
+            return
+        repl = self.replace_edit.text()
+        cur = QTextCursor(self.current.qdoc)
+        cur.beginEditBlock()  # 되돌리기 한 번에 모두 취소
+        for s, e in reversed(spans):  # 뒤에서부터 바꿔야 앞쪽 위치가 그대로다
+            cur.setPosition(py_to_q(text, s))
+            cur.setPosition(py_to_q(text, e), QTextCursor.MoveMode.KeepAnchor)
+            cur.insertText(repl)
+        cur.endEditBlock()
+        self._show_found(True, f"{len(spans)}곳 바꿈")
+        self.statusBar().showMessage(f"'{self.find_edit.text()}' → '{repl}': {len(spans)}곳을 바꿨습니다 (Ctrl+Z로 되돌리기)", 5000)
 
     def apply_format(self, fn) -> None:
         """선택한 글자(없으면 커서 위치)에 서식을 적용. 같은 버튼을 다시 누르면 해제된다. 되돌리기 한 번에 취소.
@@ -1047,7 +1278,7 @@ class MainWindow(QMainWindow):
         self.st_path.setText(str(d.path) if d.path else "(저장하지 않은 새 문서)")
         self.st_path.setToolTip(str(d.path) if d.path else "")
         self.st_kind.setText(
-            {"txt": "텍스트(.txt) → 저장 시 .md", "json": "JSON", "yaml": "YAML", "pdf": "PDF(보기만)"}.get(d.kind, "마크다운")
+            {"txt": "텍스트(.txt) → 저장 시 .md", "json": "JSON", "yaml": "YAML", "csv": "CSV", "tsv": "TSV", "pdf": "PDF(보기만)"}.get(d.kind, "마크다운")
         )
         self.st_enc.setText("" if d.is_pdf else f"{d.encoding} · {'CRLF' if d.newline == chr(13) + chr(10) else 'LF'}")
         self.st_sync.setText("동시보기 켬" if self.sync_action.isChecked() else "동시보기 끔")
@@ -1329,7 +1560,9 @@ class MainWindow(QMainWindow):
         text = doc.qdoc.toPlainText()
         self._unwatch(doc)  # 내가 쓰는 것을 '다른 프로그램이 바꿈'으로 잡지 않게
         try:
-            path.write_text(text, encoding="utf-8", newline=doc.newline)
+            # CSV는 BOM을 붙인다 — 없으면 엑셀이 한글을 깨뜨려 연다
+            enc = "utf-8-sig" if kind_of(path) in ("csv", "tsv") else "utf-8"
+            path.write_text(text, encoding=enc, newline=doc.newline)
         except OSError as e:
             self._watch(doc)
             QMessageBox.warning(self, "저장 실패", f"{path}\n{e}")

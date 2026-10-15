@@ -112,3 +112,38 @@ def q_to_py(text: str, q: int) -> int:
 
 def py_to_q(text: str, i: int) -> int:
     return sum(2 if ord(ch) > 0xFFFF else 1 for ch in text[:i])
+
+
+def insert_text(text: str, s: int, e: int, new: str) -> Edit:
+    """선택한 글자를 new로 바꾸고(선택이 없으면 커서 자리에 끼우고) 커서는 그 뒤에 둔다."""
+    end = s + len(new)
+    return s, e, new, end, end
+
+
+def blank(width: int, under: bool = True) -> str:
+    """빈칸(전각 너비 width칸). 마크다운은 빈칸을 하나로 줄이므로 &emsp;로 적는다.
+    under=True면 밑줄 친 빈칸(시험지의 '______' 같은 채워 넣을 칸)."""
+    space = "&emsp;" * max(1, width)
+    return f"<u>{space}</u>" if under else space
+
+
+def find_all(text: str, query: str, case: bool = False, word: bool = False) -> list[tuple[int, int]]:
+    """찾을 글자가 나오는 곳 [(시작, 끝)]. case=대소문자 구분, word=낱말 단위."""
+    if not query:
+        return []
+    pat = re.escape(query)
+    if word:
+        pat = rf"(?<!\w){pat}(?!\w)"
+    return [m.span() for m in re.finditer(pat, text, 0 if case else re.IGNORECASE)]
+
+
+def next_match(spans: list[tuple[int, int]], pos: int, back: bool = False) -> int | None:
+    """커서(pos) 다음(back이면 앞) 찾은 곳의 번호. 끝에 닿으면 처음(끝)으로 돌아간다."""
+    if not spans:
+        return None
+    if back:
+        before = [i for i, (s, _) in enumerate(spans) if s < pos]
+        return before[-1] if before else len(spans) - 1
+    after = [i for i, (s, _) in enumerate(spans) if s >= pos]
+    return after[0] if after else 0
+

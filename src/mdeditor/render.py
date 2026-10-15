@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import csv
 import html
+import io
 import json
 import re
 from pathlib import Path
@@ -191,10 +193,65 @@ def render_yaml(text: str) -> str:
     return "".join(parts)
 
 
+CSV_CSS = """
+table.csv { border-collapse: collapse; margin: 0 0 1em; font-size: 14px; }
+table.csv th, table.csv td { border: 1px solid #d1d9e0; padding: 4px 10px; vertical-align: top; white-space: pre-wrap; }
+table.csv thead th { position: sticky; top: 0; background: #eaeef2; z-index: 1; }
+table.csv td.idx { color: #8c959f; text-align: right; }
+table.csv td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.csv-info { color: #59636e; font-size: 13px; margin: 0 0 .6em; }
+"""
+_NUM = re.compile(r"^[+-]?(\d{1,3}(,\d{3})+|\d+)(\.\d+)?%?$")
+
+
+def _csv_delimiter(text: str, tsv: bool) -> str:
+    if tsv:
+        return "\t"
+    try:
+        return csv.Sniffer().sniff(text[:8192], delimiters=",;\t|").delimiter
+    except csv.Error:
+        return ","
+
+
+def render_csv(text: str, tsv: bool = False) -> str:
+    """CSV·TSV → 표. 첫 줄은 머리글, 숫자 칸은 오른쪽 정렬. 줄마다 data-line을 붙여 동시보기가 된다."""
+    if not text.strip():
+        return "<p class='j-null'>(빈 CSV)</p>"
+    sep = _csv_delimiter(text, tsv)
+    reader = csv.reader(io.StringIO(text), delimiter=sep)
+    rows: list[tuple[int, list[str]]] = []
+    start = 0
+    try:
+        for row in reader:
+            if row:
+                rows.append((start, row))
+            start = reader.line_num
+    except csv.Error as e:
+        return _data_err("CSV", f"{reader.line_num}번째 줄", str(e), text)
+    if not rows:
+        return "<p class='j-null'>(빈 CSV)</p>"
+    width = max(len(r) for _, r in rows)
+    (head_line, head), body = rows[0], rows[1:]
+    head = head + [""] * (width - len(head))
+
+    def cells(r: list[str]) -> str:
+        r = r + [""] * (width - len(r))
+        return "".join(f"<td class='num'>{html.escape(c)}</td>" if _NUM.match(c.strip()) else f"<td>{html.escape(c)}</td>" for c in r)
+
+    thead = f"<tr data-line='{head_line}'><th>#</th>" + "".join(f"<th>{html.escape(c)}</th>" for c in head) + "</tr>"
+    tbody = "".join(f"<tr data-line='{ln}'><td class='idx'>{i}</td>{cells(r)}</tr>" for i, (ln, r) in enumerate(body, 1))
+    name = {",": "쉼표", "\t": "탭", ";": "세미콜론", "|": "세로줄"}.get(sep, repr(sep))
+    return (
+        f"<style>{JSON_CSS}{CSV_CSS}</style><p class='csv-info'>{len(body)}줄 × {width}칸 · 구분: {name}</p>"
+        f"<table class='csv'><thead>{thead}</thead><tbody>{tbody}</tbody></table>"
+    )
+
+
 def kind_of(path: Path | None) -> str:
-    """파일 종류: 'md' | 'txt' | 'json' | 'yaml' | 'pdf'."""
+    """파일 종류: 'md' | 'txt' | 'json' | 'yaml' | 'csv' | 'tsv' | 'pdf'."""
     suffix = path.suffix.lower() if path else ".md"
-    return {".txt": "txt", ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".pdf": "pdf"}.get(suffix, "md")
+    kinds = {".txt": "txt", ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".csv": "csv", ".tsv": "tsv", ".pdf": "pdf"}
+    return kinds.get(suffix, "md")
 
 
 def render_any(text: str, base_dir: Path | None, kind: str = "md") -> str:
@@ -203,6 +260,8 @@ def render_any(text: str, base_dir: Path | None, kind: str = "md") -> str:
         return render_json(text)
     if kind == "yaml":
         return render_yaml(text)
+    if kind in ("csv", "tsv"):
+        return render_csv(text, tsv=kind == "tsv")
     return render_body(text, base_dir)
 
 

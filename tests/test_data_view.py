@@ -29,6 +29,21 @@ def test_yaml_same_view_and_multi_documents():
     assert "YAML 형식 오류" in render_yaml("a: [1, 2\n")
 
 
+def test_csv_table_header_numbers_and_lines():
+    from mdeditor.render import render_any
+
+    assert kind_of(Path("a.CSV")) == "csv" and kind_of(Path("a.tsv")) == "tsv"
+    html = render_any('이름,점수,메모\n김,90,"쉼표, 있음"\n이,1,234.5,\n', None, "csv")
+    assert "<th>이름</th>" in html and "<td>쉼표, 있음</td>" in html
+    assert "<td class='num'>90</td>" in html and "2줄 × 4칸" in html  # 칸 수가 다른 줄은 빈칸으로 채움
+    assert "data-line='0'" in html and "data-line='2'" in html  # 동시보기용 원본 줄 번호
+    assert "구분: 세미콜론" in render_any("a;b\n1;2\n", None, "csv")
+    assert "<td class='num'>2</td>" in render_any("a\tb\n1\t2\n", None, "tsv")
+    multi = render_any('a,b\n"줄\n바꿈",x\ny,z\n', None, "csv")
+    assert "data-line='3'" in multi  # 따옴표 안 줄바꿈이 있어도 다음 줄 번호가 맞다
+    assert "빈 CSV" in render_any("  \n", None, "csv")
+
+
 def test_print_document_uses_kind():
     html = print_document([("d.json", '{"k": 1}', None, "json")])
     assert "<h2>k</h2>" in html
