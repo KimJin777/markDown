@@ -62,10 +62,14 @@ from PySide6.QtWidgets import (
 from mdeditor import __version__
 from mdeditor.fmt import blank, find_all, insert_text, locate_in_source, next_match, py_to_q, q_to_py, set_heading, set_size, toggle_wrap
 from mdeditor import changelog, fileassoc, pdf2md, shortcut, single, symbols, update
-from mdeditor.render import kind_of, page, print_document, render_any
+from mdeditor.render import IMAGE_SUFFIXES, kind_of, page, print_document, render_any, render_image
 
-MD_SUFFIXES = {".md", ".markdown", ".mdown", ".txt", ".json", ".yaml", ".yml", ".csv", ".tsv", ".pdf"}
-MD_FILTER = "읽을 수 있는 파일 (*.md *.markdown *.mdown *.txt *.json *.yaml *.yml *.csv *.tsv *.pdf);;마크다운 (*.md *.markdown *.mdown);;텍스트 (*.txt);;JSON (*.json);;YAML (*.yaml *.yml);;CSV (*.csv *.tsv);;PDF (*.pdf);;모든 파일 (*)"
+MD_SUFFIXES = {".md", ".markdown", ".mdown", ".txt", ".json", ".yaml", ".yml", ".csv", ".tsv", ".pdf"} | IMAGE_SUFFIXES
+MD_FILTER = (
+    "읽을 수 있는 파일 (*.md *.markdown *.mdown *.txt *.json *.yaml *.yml *.csv *.tsv *.pdf "
+    "*.png *.jpg *.jpeg *.gif *.bmp *.webp *.svg);;마크다운 (*.md *.markdown *.mdown);;텍스트 (*.txt);;JSON (*.json);;"
+    "YAML (*.yaml *.yml);;CSV (*.csv *.tsv);;PDF (*.pdf);;그림 (*.png *.jpg *.jpeg *.gif *.bmp *.webp *.svg);;모든 파일 (*)"
+)
 SAVE_FILTER = "마크다운 (*.md *.markdown *.mdown);;텍스트 (*.txt);;JSON (*.json);;YAML (*.yaml *.yml);;CSV (*.csv *.tsv);;모든 파일 (*)"
 ICON = Path(__file__).with_name("icon.ico")
 
@@ -317,6 +321,17 @@ def pdf_names(docs: list, folder: Path) -> list[str]:
     return out
 
 
+def pdf_jobs_each(docs: list, fallback: Path) -> list[tuple]:
+    """[(문서, 쓸 PDF 경로)] — 파일마다 그 파일이 있는 폴더에 저장. 저장하지 않은 새 문서는 fallback 폴더로."""
+    groups: dict[Path, list] = {}
+    for d in docs:
+        groups.setdefault(d.path.parent if d.path else fallback, []).append(d)
+    out: list[tuple] = []
+    for folder, ds in groups.items():
+        out += list(zip(ds, pdf_names(ds, folder)))
+    return out
+
+
 def _natural(text: str) -> list:
     """'문서2'가 '문서10'보다 앞에 오도록 숫자는 수로 비교한다."""
     return [(0, int(t), "") if t.isdigit() else (1, 0, t) for t in re.split(r"(\d+)", text.casefold()) if t]
@@ -443,6 +458,16 @@ class Doc:
     def is_pdf(self) -> bool:
         """PDF: 뷰어에서 보기만 한다(원본 편집·저장 없음)."""
         return self.kind == "pdf"
+
+    @property
+    def is_image(self) -> bool:
+        """그림 파일(.png .jpg 등): 뷰어에서 보기만 한다."""
+        return self.kind == "image"
+
+    @property
+    def view_only(self) -> bool:
+        """보기만 하는 파일(PDF·그림): 원본 편집·저장 없음."""
+        return self.kind in ("pdf", "image")
 
     @property
     def is_text(self) -> bool:
@@ -1012,8 +1037,8 @@ class MainWindow(QMainWindow):
         self.find_bar = bar
 
     def _find_in_editor(self) -> bool:
-        """원본 창에서 찾을지(아니면 뷰어에서). 원본을 숨겼거나 PDF면 뷰어에서 찾는다(바꾸기는 안 됨)."""
-        return self.current is not None and not self.current.is_pdf and self.editor.isVisible()
+        """원본 창에서 찾을지(아니면 뷰어에서). 원본을 숨겼거나 PDF·그림이면 뷰어에서 찾는다(바꾸기는 안 됨)."""
+        return self.current is not None and not self.current.view_only and self.editor.isVisible()
 
     def _view(self) -> QWebEngineView:
         return self.pdf_view if self.current is not None and self.current.is_pdf else self.preview
@@ -1113,7 +1138,7 @@ class MainWindow(QMainWindow):
     def apply_format(self, fn) -> None:
         """선택한 글자(없으면 커서 위치)에 서식을 적용. 같은 버튼을 다시 누르면 해제된다. 되돌리기 한 번에 취소.
         마지막으로 뷰어를 눌렀으면 뷰어에서 선택한 글자를 원본에서 찾아 적용한다."""
-        if self.current is None or self.current.is_pdf:
+        if self.current is None or self.current.view_only:
             return
         if self._last_pane == "preview":
             self.preview_page.runJavaScript("selectionInfo()", 0, lambda info: self._apply_from_preview(fn, info))
@@ -1283,11 +1308,17 @@ class MainWindow(QMainWindow):
             return
         self.current = doc
         self.editor.setDocument(doc.qdoc)
-        self.editor.setReadOnly(doc.is_pdf)
-        self.editor.setPlaceholderText(
-            "PDF 파일은 오른쪽 뷰어에서 보기만 합니다(원본 편집 없음).\n"
-            "마크다운으로 고치려면 위쪽 [PDF→MD](Ctrl+Shift+M)로 바꾸세요." if doc.is_pdf else ""
-        )
+        self.editor.setReadOnly(doc.view_only)
+        if doc.is_pdf:
+            placeholder = (
+                "PDF 파일은 오른쪽 뷰어에서 보기만 합니다(원본 편집 없음).\n"
+                "마크다운으로 고치려면 위쪽 [PDF→MD](Ctrl+Shift+M)로 바꾸세요."
+            )
+        elif doc.is_image:
+            placeholder = "그림 파일은 오른쪽 뷰어에서 보기만 합니다(원본 편집 없음).\n뷰어에서 그림을 누르면 크게 볼 수 있습니다."
+        else:
+            placeholder = ""
+        self.editor.setPlaceholderText(placeholder)
         self.editor.setFocus()
         self._refresh_item(doc)
         self._show_changes()
@@ -1323,9 +1354,9 @@ class MainWindow(QMainWindow):
         self.st_path.setText(str(d.path) if d.path else "(저장하지 않은 새 문서)")
         self.st_path.setToolTip(str(d.path) if d.path else "")
         self.st_kind.setText(
-            {"txt": "텍스트(.txt) → 저장 시 .md", "json": "JSON", "yaml": "YAML", "csv": "CSV", "tsv": "TSV", "pdf": "PDF(보기만)"}.get(d.kind, "마크다운")
+            {"txt": "텍스트(.txt) → 저장 시 .md", "json": "JSON", "yaml": "YAML", "csv": "CSV", "tsv": "TSV", "pdf": "PDF(보기만)", "image": "그림(보기만)"}.get(d.kind, "마크다운")
         )
-        self.st_enc.setText("" if d.is_pdf else f"{d.encoding} · {'CRLF' if d.newline == chr(13) + chr(10) else 'LF'}")
+        self.st_enc.setText("" if d.view_only else f"{d.encoding} · {'CRLF' if d.newline == chr(13) + chr(10) else 'LF'}")
         self.st_sync.setText("동시보기 켬" if self.sync_action.isChecked() else "동시보기 끔")
         self._update_pos()
 
@@ -1424,7 +1455,8 @@ class MainWindow(QMainWindow):
                 last = existing
                 continue
             try:
-                text, enc, newline = ("", "PDF", "\n") if kind_of(f) == "pdf" else read_text(f)
+                # PDF·그림은 본문을 읽지 않는다(뷰어가 파일을 직접 보여 줌)
+                text, enc, newline = ("", "", "\n") if kind_of(f) in ("pdf", "image") else read_text(f)
             except OSError as e:
                 QMessageBox.warning(self, "열기 실패", f"{f}\n{e}")
                 continue
@@ -1471,7 +1503,7 @@ class MainWindow(QMainWindow):
         if stamp == doc.stamp:
             return
         doc.stamp = stamp
-        if not doc.is_pdf:
+        if not doc.view_only:
             try:
                 text, _enc, _newline = read_text(doc.path)
             except OSError:
@@ -1498,12 +1530,12 @@ class MainWindow(QMainWindow):
 
     def _reload_doc(self, doc: Doc) -> None:
         """파일에서 다시 읽는다. 여기서 고치고 저장하지 않은 내용이 있으면 먼저 묻는다."""
-        if doc.is_pdf:
+        if doc.view_only:
             doc.changed_outside = False
             if doc is self.current:
-                self._show_pdf(doc.path, reload=True)
+                self._show_pdf(doc.path, reload=True) if doc.is_pdf else self.render_preview()
             self._refresh_item(doc)
-            self.statusBar().showMessage(f"PDF를 새로 불러왔습니다: {doc.name}", 5000)
+            self.statusBar().showMessage(f"{'PDF' if doc.is_pdf else '그림'}을 새로 불러왔습니다: {doc.name}", 5000)
             return
         try:
             text, enc, newline = read_text(doc.path)
@@ -1625,8 +1657,8 @@ class MainWindow(QMainWindow):
         return True
 
     def save(self, doc: Doc) -> bool:
-        if doc.is_pdf:
-            self.statusBar().showMessage("PDF는 보기만 하므로 저장할 것이 없습니다.", 4000)
+        if doc.view_only:
+            self.statusBar().showMessage(f"{'PDF' if doc.is_pdf else '그림 파일'}은 보기만 하므로 저장할 것이 없습니다.", 4000)
             return True
         if doc.path and doc.is_text:
             # 텍스트 파일은 같은 이름의 .md로 저장하고, 그 뒤로는 .md가 원본이 된다(원래 .txt는 그대로 둔다)
@@ -1642,8 +1674,8 @@ class MainWindow(QMainWindow):
         return self._write(doc, doc.path) if doc.path else self.save_as(doc)
 
     def save_as(self, doc: Doc) -> bool:
-        if doc.is_pdf:
-            self.statusBar().showMessage("PDF는 다른 이름으로 저장할 수 없습니다(보기만).", 4000)
+        if doc.view_only:
+            self.statusBar().showMessage(f"{'PDF' if doc.is_pdf else '그림 파일'}은 다른 이름으로 저장할 수 없습니다(보기만).", 4000)
             return False
         if doc.path:
             start = str(doc.path.with_suffix(".md") if doc.is_text else doc.path)
@@ -1699,14 +1731,21 @@ class MainWindow(QMainWindow):
         targets = self._checked() or ([self.current] if self.current else [])
         if not targets or not self._confirm_discard([d for d in targets if d.dirty]):
             return
-        if self.current in targets:
-            self.current = None
+        # 한꺼번에 지우고 목록은 한 번만 다시 그린다(하나씩 지우며 매번 다시 그리는 동안 프로그램이 죽는 일이 있었음)
+        closing = {id(d) for d in targets}
         for doc in targets:
-            self._remove_doc(doc)
+            self._unwatch(doc)
+        self.docs = [d for d in self.docs if id(d) not in closing]
+        if self.current is not None and id(self.current) in closing:
+            self.current = None
         if not self.docs:
-            self.new_file()
-        elif self.current is None:
-            self.files.setCurrentItem(self.files.leaves()[0])
+            self.new_file()  # 다 닫아도 프로그램은 그대로 — 새 문서를 하나 만든다
+        else:
+            self._apply_sort()
+            if self.current is None:
+                self.files.setCurrentItem(self.files.leaves()[0])
+        for doc in targets:  # 편집기가 남은(또는 새) 문서로 옮겨 간 뒤에 닫은 문서의 편집 버퍼를 정리한다
+            doc.qdoc.deleteLater()
         if len(targets) > 1:
             self.statusBar().showMessage(f"{len(targets)}개 파일을 목록에서 닫았습니다.", 4000)
 
@@ -1814,6 +1853,10 @@ class MainWindow(QMainWindow):
                 f"<p><b>저장</b>(Ctrl+S)하면 같은 이름의 <b>{html.escape(md_name)}</b>로 저장되고,<br>"
                 "그때부터 그 .md 파일이 원본이 되어 이 뷰어에 나타납니다.</p></div>"
             )
+        elif self.current.is_image:
+            # 밖에서 바뀐 그림이 새로 읽히게 고친 시각을 주소에 붙인다
+            stamp = file_stamp(self.current.path)
+            body = render_image(self.current.path.name, self.current.base_dir, int((stamp or (0, 0))[0] * 1000))
         else:
             body = render_any(self.current.qdoc.toPlainText(), self.current.base_dir, self.current.kind)
         lines = self.current.qdoc.blockCount()
@@ -1941,7 +1984,7 @@ class MainWindow(QMainWindow):
         """화면에 띄우지 않는 뷰에 인쇄용 HTML을 올리고, 다 읽으면 on_loaded(view, ok)."""
         view = QWebEngineView()
         self._print_jobs.append(view)
-        html = print_document([(d.name, d.qdoc.toPlainText(), d.base_dir, d.kind) for d in docs])
+        html = print_document([(d.name, d.path.name if d.is_image else d.qdoc.toPlainText(), d.base_dir, d.kind) for d in docs])
         # setHtml은 2MB를 넘으면 조용히 실패하므로 임시 파일로 써서 읽힌다
         fd, tmp = tempfile.mkstemp(prefix="mdeditor-", suffix=".html")
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -1976,11 +2019,24 @@ class MainWindow(QMainWindow):
             self.export_pdfs([(docs[0], path)])
             return
 
-        # 여러 개: 저장할 폴더만 고르면 파일마다 '원래 파일 이름.pdf'로 따로 저장
-        folder = QFileDialog.getExistingDirectory(self, f"PDF {len(docs)}개를 저장할 폴더", self._last_dir())
-        if not folder:
+        # 여러 개: 한 폴더에 모을지, 파일마다 그 파일이 있는 폴더에 둘지 먼저 묻는다(기능 요청 #9)
+        box = QMessageBox(self)
+        box.setWindowTitle("PDF로 저장")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(f"PDF {len(docs)}개를 어디에 저장할까요?")
+        one = box.addButton("한 폴더에 모아 저장", QMessageBox.ButtonRole.AcceptRole)
+        each = box.addButton("각 파일의 폴더에 저장", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("취소", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is each:
+            jobs = pdf_jobs_each(docs, Path(self._last_dir()))
+        elif box.clickedButton() is one:
+            folder = QFileDialog.getExistingDirectory(self, f"PDF {len(docs)}개를 저장할 폴더", self._last_dir())
+            if not folder:
+                return
+            jobs = list(zip(docs, pdf_names(docs, Path(folder))))
+        else:
             return
-        jobs = list(zip(docs, pdf_names(docs, Path(folder))))
         exists = [p for _, p in jobs if Path(p).exists()]
         if exists:
             names = "\n".join(f"  • {Path(p).name}" for p in exists[:10]) + ("\n  ..." if len(exists) > 10 else "")
@@ -2004,7 +2060,8 @@ class MainWindow(QMainWindow):
         def next_job() -> None:
             if not queue:
                 done = total - len(failed)
-                where = jobs[0][1] if total == 1 else str(Path(jobs[0][1]).parent)
+                folders = {str(Path(p).parent) for _, p in jobs}
+                where = jobs[0][1] if total == 1 else (folders.pop() if len(folders) == 1 else "각 파일의 폴더")
                 self.statusBar().showMessage(f"PDF {done}/{total}개를 저장했습니다: {where}", 10000)
                 if failed:
                     QMessageBox.warning(

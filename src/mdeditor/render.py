@@ -193,6 +193,9 @@ def render_yaml(text: str) -> str:
     return "".join(parts)
 
 
+# 열마다 다른 글자색(어두운 색만 — 흰 바탕에서 읽기 좋게). 열이 많으면 처음부터 돌려 쓴다.
+CSV_COLORS = ["#1f2328", "#0969da", "#bc4c00", "#1a7f37", "#8250df", "#cf222e", "#9a6700", "#1b7c83"]
+
 CSV_CSS = """
 table.csv { border-collapse: collapse; margin: 0 0 1em; font-size: 14px; }
 table.csv th, table.csv td { border: 1px solid #d1d9e0; padding: 4px 10px; vertical-align: top; white-space: pre-wrap; }
@@ -200,7 +203,7 @@ table.csv thead th { position: sticky; top: 0; background: #eaeef2; z-index: 1; 
 table.csv td.idx { color: #8c959f; text-align: right; }
 table.csv td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .csv-info { color: #59636e; font-size: 13px; margin: 0 0 .6em; }
-"""
+""" + "".join(f"table.csv .c{i} {{ color: {c}; }}\n" for i, c in enumerate(CSV_COLORS))
 _NUM = re.compile(r"^[+-]?(\d{1,3}(,\d{3})+|\d+)(\.\d+)?%?$")
 
 
@@ -233,12 +236,19 @@ def render_csv(text: str, tsv: bool = False) -> str:
     width = max(len(r) for _, r in rows)
     (head_line, head), body = rows[0], rows[1:]
     head = head + [""] * (width - len(head))
+    col = [f"c{i % len(CSV_COLORS)}" for i in range(width)]  # 열마다 글자색을 다르게(보기 편하게)
 
     def cells(r: list[str]) -> str:
         r = r + [""] * (width - len(r))
-        return "".join(f"<td class='num'>{html.escape(c)}</td>" if _NUM.match(c.strip()) else f"<td>{html.escape(c)}</td>" for c in r)
+        return "".join(
+            f"<td class='{col[i]}{' num' if _NUM.match(c.strip()) else ''}'>{html.escape(c)}</td>" for i, c in enumerate(r)
+        )
 
-    thead = f"<tr data-line='{head_line}'><th>#</th>" + "".join(f"<th>{html.escape(c)}</th>" for c in head) + "</tr>"
+    thead = (
+        f"<tr data-line='{head_line}'><th>#</th>"
+        + "".join(f"<th class='{col[i]}'>{html.escape(c)}</th>" for i, c in enumerate(head))
+        + "</tr>"
+    )
     tbody = "".join(f"<tr data-line='{ln}'><td class='idx'>{i}</td>{cells(r)}</tr>" for i, (ln, r) in enumerate(body, 1))
     name = {",": "쉼표", "\t": "탭", ";": "세미콜론", "|": "세로줄"}.get(sep, repr(sep))
     return (
@@ -247,21 +257,36 @@ def render_csv(text: str, tsv: bool = False) -> str:
     )
 
 
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"}
+
+
 def kind_of(path: Path | None) -> str:
-    """파일 종류: 'md' | 'txt' | 'json' | 'yaml' | 'csv' | 'tsv' | 'pdf'."""
+    """파일 종류: 'md' | 'txt' | 'json' | 'yaml' | 'csv' | 'tsv' | 'pdf' | 'image'."""
     suffix = path.suffix.lower() if path else ".md"
     kinds = {".txt": "txt", ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".csv": "csv", ".tsv": "tsv", ".pdf": "pdf"}
+    if suffix in IMAGE_SUFFIXES:
+        return "image"
     return kinds.get(suffix, "md")
 
 
+def render_image(name: str, base_dir: Path | None, stamp: int = 0) -> str:
+    """그림 파일 보기: 그림 하나가 본문. stamp(고친 시각)를 주소 뒤에 붙여 밖에서 바뀐 그림이 새로 읽히게 한다."""
+    src = _absolute(name, base_dir)
+    if stamp:
+        src += f"?r={stamp}"
+    return f"<img src='{html.escape(src, quote=True)}' alt='{html.escape(name)}'>"
+
+
 def render_any(text: str, base_dir: Path | None, kind: str = "md") -> str:
-    """파일 종류별 본문 HTML."""
+    """파일 종류별 본문 HTML. 그림(kind='image')은 text 자리에 파일 이름을 받는다."""
     if kind == "json":
         return render_json(text)
     if kind == "yaml":
         return render_yaml(text)
     if kind in ("csv", "tsv"):
         return render_csv(text, tsv=kind == "tsv")
+    if kind == "image":
+        return render_image(text, base_dir)
     return render_body(text, base_dir)
 
 
