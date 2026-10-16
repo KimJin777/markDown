@@ -51,7 +51,7 @@ wheels = [
 
 [[package]]
 name = "markdown-editor"
-version = "0.17.0"
+version = "0.18.0"
 source = { editable = "." }
 dependencies = [
     { name = "markdown-it-py" },
@@ -60,6 +60,7 @@ dependencies = [
     { name = "pymupdf4llm" },
     { name = "pyside6" },
     { name = "pyyaml" },
+    { name = "syhwp" },
 ]
 
 [package.dev-dependencies]
@@ -76,6 +77,7 @@ requires-dist = [
     { name = "pymupdf4llm", specifier = ">=1.28.2" },
     { name = "pyside6", specifier = ">=6.7" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "syhwp", specifier = ">=0.0.8" },
 ]
 
 [package.metadata.requires-dev]
@@ -154,6 +156,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/e9/98/d27552990f1bd611ef3e7466adadc78312ea2df63b83aad47fdc3d3ca8df/numpy-2.5.4-cp313-cp313-win32.whl", hash = "sha256:5258bc06526964be5face2fc6f756857a3f24f21ec3e72ca131337a75b165d6c", size = 6134537, upload-time = "2026-10-10T20:03:30.511Z" },
     { url = "https://files.pythonhosted.org/packages/90/8c/140a40398a66b4471211be1affdb6ed24c486d581bd28d07b7f2fcb69540/numpy-2.5.4-cp313-cp313-win_amd64.whl", hash = "sha256:8b4d2fd2d34e5f8c9235ee787de5631a37a28402b15cb80814df973d2be54129", size = 12566113, upload-time = "2026-10-10T20:03:32.612Z" },
     { url = "https://files.pythonhosted.org/packages/34/52/01d205e5e8ccb27b2b0b141e801f22b830198c979111b0fa44771438d9a9/numpy-2.5.4-cp313-cp313-win_arm64.whl", hash = "sha256:bc39ac66a7a9a3fbd6134fda43136b60ffde99c8f4501e64e0d2b24da137babf", size = 10519523, upload-time = "2026-10-10T20:03:35.163Z" },
+]
+
+[[package]]
+name = "olefile"
+version = "0.47"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/69/1b/077b508e3e500e1629d366249c3ccb32f95e50258b231705c09e3c7a4366/olefile-0.47.zip", hash = "sha256:599383381a0bf3dfbd932ca0ca6515acd174ed48870cbf7fee123d698c192c1c", size = 112240, upload-time = "2023-12-01T16:22:53.025Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/17/d3/b64c356a907242d719fc668b71befd73324e47ab46c8ebbbede252c154b2/olefile-0.47-py2.py3-none-any.whl", hash = "sha256:543c7da2a7adadf21214938bb79c83ea12b473a4b6ee4ad4bf854e7715e13d1f", size = 114565, upload-time = "2023-12-01T16:22:51.518Z" },
 ]
 
 [[package]]
@@ -465,6 +476,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/56/05/79ed0697515d4fc7435459e4ed4c4a3b5621a55b7c91d0f3f2cc3d617aa0/shiboken6-6.11.2-cp310-abi3-manylinux_2_39_aarch64.whl", hash = "sha256:4bbbd6fa4d7cff5ec5e12bc4c10e1d845fa30c89457ecb13cc64f7bddb77f6f9", size = 270668, upload-time = "2026-08-18T06:37:15.025Z" },
     { url = "https://files.pythonhosted.org/packages/ce/6b/fee1b4814317e4664e318644c9c007676c65a71e5b2b9d3ac4121a94dc0a/shiboken6-6.11.2-cp310-abi3-win_amd64.whl", hash = "sha256:6ab0eba1c904455df621f9a6df3ca2bb896bab8670572d2bc4e37804ae91f19a", size = 1226578, upload-time = "2026-08-18T06:37:18.002Z" },
     { url = "https://files.pythonhosted.org/packages/4d/b5/80c4e5aafeb8ac777cf5a1becfe87ac7197c35051df00b5f7819787e09d5/shiboken6-6.11.2-cp310-abi3-win_arm64.whl", hash = "sha256:97c49432488df958f0308736f3d15b6915d8826fc380af17bb4b9ec5c4a5e81b", size = 1784669, upload-time = "2026-08-18T06:37:21.046Z" },
+]
+
+[[package]]
+name = "syhwp"
+version = "0.0.8"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "olefile" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f8/7e/6806f1df51f4f8456759545e94a8b0961d42f2fabc54695ea64806aaae04/syhwp-0.0.8.tar.gz", hash = "sha256:d5d3d4962e49d4372e436cce21b11a25013cbb2cb3b36d7410759d4ca6387e43", size = 44128, upload-time = "2026-09-19T05:27:59.698Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/01/9d/5621be52c9980b78e7616cc6f41ae81917fe9ea248fdbd4f1d64d4bdc5b1/syhwp-0.0.8-py3-none-any.whl", hash = "sha256:cc34d3f46abe7cc13b5f718f719a4d028a20f37a4aad811294de256784448c6b", size = 20321, upload-time = "2026-09-19T05:27:58.517Z" },
 ]
 
 [[package]]

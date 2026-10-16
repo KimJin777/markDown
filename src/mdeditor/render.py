@@ -261,9 +261,12 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"}
 
 
 def kind_of(path: Path | None) -> str:
-    """파일 종류: 'md' | 'txt' | 'json' | 'yaml' | 'csv' | 'tsv' | 'pdf' | 'image'."""
+    """파일 종류: 'md' | 'txt' | 'json' | 'yaml' | 'csv' | 'tsv' | 'pdf' | 'image' | 'hwp'."""
     suffix = path.suffix.lower() if path else ".md"
-    kinds = {".txt": "txt", ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".csv": "csv", ".tsv": "tsv", ".pdf": "pdf"}
+    kinds = {
+        ".txt": "txt", ".json": "json", ".yaml": "yaml", ".yml": "yaml",
+        ".csv": "csv", ".tsv": "tsv", ".pdf": "pdf", ".hwp": "hwp", ".hwpx": "hwp",
+    }
     if suffix in IMAGE_SUFFIXES:
         return "image"
     return kinds.get(suffix, "md")

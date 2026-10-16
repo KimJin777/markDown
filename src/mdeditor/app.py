@@ -60,14 +60,14 @@ from PySide6.QtWidgets import (
 
 from mdeditor import __version__
 from mdeditor.fmt import blank, find_all, insert_text, locate_in_source, next_match, py_to_q, q_to_py, set_heading, set_size, toggle_wrap
-from mdeditor import autosave, changelog, fileassoc, icons, pdf2md, shortcut, single, symbols, update
+from mdeditor import autosave, changelog, fileassoc, hwp2md, icons, pdf2md, shortcut, single, symbols, update
 from mdeditor.render import IMAGE_SUFFIXES, kind_of, page, print_document, render_any, render_image
 
-MD_SUFFIXES = {".md", ".markdown", ".mdown", ".txt", ".json", ".yaml", ".yml", ".csv", ".tsv", ".pdf"} | IMAGE_SUFFIXES
+MD_SUFFIXES = {".md", ".markdown", ".mdown", ".txt", ".json", ".yaml", ".yml", ".csv", ".tsv", ".pdf", ".hwp", ".hwpx"} | IMAGE_SUFFIXES
 MD_FILTER = (
-    "읽을 수 있는 파일 (*.md *.markdown *.mdown *.txt *.json *.yaml *.yml *.csv *.tsv *.pdf "
+    "읽을 수 있는 파일 (*.md *.markdown *.mdown *.txt *.json *.yaml *.yml *.csv *.tsv *.pdf *.hwp *.hwpx "
     "*.png *.jpg *.jpeg *.gif *.bmp *.webp *.svg);;마크다운 (*.md *.markdown *.mdown);;텍스트 (*.txt);;JSON (*.json);;"
-    "YAML (*.yaml *.yml);;CSV (*.csv *.tsv);;PDF (*.pdf);;그림 (*.png *.jpg *.jpeg *.gif *.bmp *.webp *.svg);;모든 파일 (*)"
+    "YAML (*.yaml *.yml);;CSV (*.csv *.tsv);;PDF (*.pdf);;HWP (*.hwp *.hwpx);;그림 (*.png *.jpg *.jpeg *.gif *.bmp *.webp *.svg);;모든 파일 (*)"
 )
 SAVE_FILTER = "마크다운 (*.md *.markdown *.mdown);;텍스트 (*.txt);;JSON (*.json);;YAML (*.yaml *.yml);;CSV (*.csv *.tsv);;모든 파일 (*)"
 ICON = Path(__file__).with_name("icon.ico")
@@ -443,6 +443,7 @@ class Doc:
     changed_outside: bool = False  # 다른 프로그램이 파일을 바꿈 → [새로 불러오기](F5)를 기다리는 중
     changed_lines: list[int] = field(default_factory=list)  # 새로 불러와서 바뀐 줄(파란색) — 여기서 고치면 지운다
     reloaded: bool = False  # 바뀐 파일을 새로 불러왔고 아직 [검토완료] 전 → 목록에 ↻(파란색)
+    base_override: Path | None = None  # 상대 경로 그림의 기준 폴더(HWP: 임시 폴더에 꺼낸 그림을 가리킴)
 
     @property
     def name(self) -> str:
@@ -465,8 +466,8 @@ class Doc:
 
     @property
     def view_only(self) -> bool:
-        """보기만 하는 파일(PDF·그림): 원본 편집·저장 없음."""
-        return self.kind in ("pdf", "image")
+        """보기만 하는 파일(PDF·그림·HWP): 원본 편집·저장 없음."""
+        return self.kind in ("pdf", "image", "hwp")
 
     @property
     def is_text(self) -> bool:
@@ -475,7 +476,7 @@ class Doc:
 
     @property
     def base_dir(self) -> Path | None:
-        return self.path.parent if self.path else None
+        return self.base_override or (self.path.parent if self.path else None)
 
     @property
     def dirty(self) -> bool:
@@ -504,20 +505,21 @@ class RenderWorker(QThread):
 
 
 class PdfToMdWorker(QThread):
-    """PDF를 마크다운으로 바꾸는 일을 화면 밖 스레드에서 한다(쪽이 많으면 몇 초 걸림)."""
+    """PDF·HWP를 마크다운으로 바꾸는 일을 화면 밖 스레드에서 한다(쪽이 많으면 몇 초 걸림)."""
 
-    converted = Signal(object, object, object)  # (PDF 경로, 쓸 .md 경로, 마크다운 글 또는 오류)
+    converted = Signal(object, object, object)  # (원본 경로, 쓸 .md 경로, 마크다운 글 또는 오류)
 
     def __init__(self, jobs: list[tuple[Path, Path]], parent=None) -> None:
         super().__init__(parent)
-        self.jobs = jobs  # (PDF, 쓸 .md) — 그림은 .md 옆 '이름_images' 폴더로
+        self.jobs = jobs  # (원본, 쓸 .md) — 그림은 .md 옆 '이름_images' 폴더로
 
     def run(self) -> None:
-        for pdf, out in self.jobs:
+        for src, out in self.jobs:
+            convert = hwp2md.convert if kind_of(src) == "hwp" else pdf2md.convert
             try:
-                self.converted.emit(pdf, out, pdf2md.convert(pdf, out))
-            except Exception as e:  # noqa: BLE001 — 깨진 PDF 등: 그 파일만 건너뛰고 알려 준다
-                self.converted.emit(pdf, out, e)
+                self.converted.emit(src, out, convert(src, out))
+            except Exception as e:  # noqa: BLE001 — 깨진 파일·암호 문서 등: 그 파일만 건너뛰고 알려 준다
+                self.converted.emit(src, out, e)
 
 
 class FileList(QTreeWidget):
@@ -822,9 +824,9 @@ class MainWindow(QMainWindow):
         f.addSeparator()
         a_print = act(f, "체크한 파일 인쇄...", self.print_checked, QKeySequence.StandardKey.Print)
         a_pdf = act(f, "체크한 파일 PDF로 저장...", self.save_pdf, "Ctrl+Shift+P")
-        self.pdf2md_action = act(f, "PDF를 마크다운으로 바꾸기", self.convert_pdfs, "Ctrl+Shift+M")
+        self.pdf2md_action = act(f, "PDF·HWP를 마크다운으로 바꾸기", self.convert_pdfs, "Ctrl+Shift+M")
         self.pdf2md_action.setToolTip(
-            "체크한 PDF(없으면 지금 보는 PDF)를 같은 폴더에 '이름.md'로 바꿔 목록에 올립니다 — 글자·표만, 그림은 빠짐"
+            "체크한 PDF·HWP(없으면 지금 보는 파일)를 같은 폴더에 '이름.md'로 바꿔 목록에 올립니다 — 그림은 옆 '이름_images' 폴더로"
         )
         f.addSeparator()
         act(f, "바탕화면에 바로가기 만들기", lambda: self.make_shortcut())
@@ -930,7 +932,7 @@ class MainWindow(QMainWindow):
             (None, None, None),
             (a_print, "인쇄", "print"),
             (a_pdf, "PDF로 저장", "pdf"),
-            (self.pdf2md_action, "PDF→MD", "pdf2md"),
+            (self.pdf2md_action, "MD로 바꾸기", "pdf2md"),
         ):
             if a is None:
                 bar.addSeparator()
@@ -1395,7 +1397,7 @@ class MainWindow(QMainWindow):
         if doc.is_pdf:
             placeholder = (
                 "PDF 파일은 오른쪽 뷰어에서 보기만 합니다(원본 편집 없음).\n"
-                "마크다운으로 고치려면 위쪽 [PDF→MD](Ctrl+Shift+M)로 바꾸세요."
+                "마크다운으로 고치려면 위쪽 [MD로 바꾸기](Ctrl+Shift+M)로 바꾸세요."
             )
         elif doc.is_image:
             placeholder = "그림 파일은 오른쪽 뷰어에서 보기만 합니다(원본 편집 없음).\n뷰어에서 그림을 누르면 크게 볼 수 있습니다."
@@ -1437,7 +1439,10 @@ class MainWindow(QMainWindow):
         self.st_path.setText(str(d.path) if d.path else "(저장하지 않은 새 문서)")
         self.st_path.setToolTip(str(d.path) if d.path else "")
         self.st_kind.setText(
-            {"txt": "텍스트(.txt) → 저장 시 .md", "json": "JSON", "yaml": "YAML", "csv": "CSV", "tsv": "TSV", "pdf": "PDF(보기만)", "image": "그림(보기만)"}.get(d.kind, "마크다운")
+            {
+                "txt": "텍스트(.txt) → 저장 시 .md", "json": "JSON", "yaml": "YAML", "csv": "CSV", "tsv": "TSV",
+                "pdf": "PDF(보기만)", "image": "그림(보기만)", "hwp": "HWP(보기만) — 고치려면 MD로 바꾸기",
+            }.get(d.kind, "마크다운")
         )
         self.st_enc.setText("" if d.view_only else f"{d.encoding} · {'CRLF' if d.newline == chr(13) + chr(10) else 'LF'}")
         self.st_sync.setText("동시보기 켬" if self.sync_action.isChecked() else "동시보기 끔")
@@ -1537,13 +1542,20 @@ class MainWindow(QMainWindow):
             if existing:
                 last = existing
                 continue
+            base = None
             try:
-                # PDF·그림은 본문을 읽지 않는다(뷰어가 파일을 직접 보여 줌)
-                text, enc, newline = ("", "", "\n") if kind_of(f) in ("pdf", "image") else read_text(f)
-            except OSError as e:
+                kind = kind_of(f)
+                if kind in ("pdf", "image"):  # 뷰어가 파일을 직접 보여 준다 — 본문을 읽지 않는다
+                    text, enc, newline = "", "", "\n"
+                elif kind == "hwp":  # HWP·HWPX는 마크다운으로 바꿔 보여 준다(보기 전용)
+                    text, base = self._load_hwp(f)
+                    enc, newline = "", "\n"
+                else:
+                    text, enc, newline = read_text(f)
+            except Exception as e:  # noqa: BLE001 — 읽기 실패·암호 HWP·깨진 파일: 그 파일만 건너뛴다
                 QMessageBox.warning(self, "열기 실패", f"{f}\n{e}")
                 continue
-            doc = Doc(path=f, saved_text=text, encoding=enc, newline=newline, stamp=file_stamp(f))
+            doc = Doc(path=f, saved_text=text, encoding=enc, newline=newline, stamp=file_stamp(f), base_override=base)
             doc.qdoc.setPlainText(text)
             doc.qdoc.setModified(False)
             self._add_doc(doc)
@@ -1552,6 +1564,17 @@ class MainWindow(QMainWindow):
         if last and (item := self._item_of(last)):
             self.files.setCurrentItem(item)
         self.statusBar().showMessage(f"{len(files)}개 파일을 올렸습니다.", 4000)
+
+    def _load_hwp(self, f: Path) -> tuple[str, Path]:
+        """HWP·HWPX를 마크다운으로 바꿔 읽는다. 그림은 임시 폴더에 꺼내 뷰어가 가리킨다(원본 옆에는 아무것도 안 만듦)."""
+        stamp = file_stamp(f)
+        cache = Path(tempfile.gettempdir()) / "mdEditor-hwp" / f"{pdf2md._safe(f.stem)}-{int((stamp or (0, 0))[0])}"
+        cache.mkdir(parents=True, exist_ok=True)
+        QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)  # 그림 많은 파일은 1~2초
+        try:
+            return hwp2md.convert(f, cache / f"{f.stem}.md"), cache
+        finally:
+            QApplication.restoreOverrideCursor()
 
     # ---------- 바뀐 파일 다시 읽기(감지) ----------
     def _watch(self, doc: Doc) -> None:
@@ -1615,10 +1638,22 @@ class MainWindow(QMainWindow):
         """파일에서 다시 읽는다. 여기서 고치고 저장하지 않은 내용이 있으면 먼저 묻는다."""
         if doc.view_only:
             doc.changed_outside = False
+            if doc.kind == "hwp":  # 바뀐 HWP는 다시 마크다운으로 바꾼다
+                try:
+                    text, doc.base_override = self._load_hwp(doc.path)
+                except Exception as e:  # noqa: BLE001
+                    QMessageBox.warning(self, "새로 불러오기", f"{doc.path}\n{e}")
+                    return
+                self._reloading = True
+                try:
+                    self._replace_text(doc, text, "", "\n")
+                finally:
+                    self._reloading = False
             if doc is self.current:
                 self._show_pdf(doc.path, reload=True) if doc.is_pdf else self.render_preview()
             self._refresh_item(doc)
-            self.statusBar().showMessage(f"{'PDF' if doc.is_pdf else '그림'}을 새로 불러왔습니다: {doc.name}", 5000)
+            kind_name = {"pdf": "PDF", "image": "그림"}.get(doc.kind, "HWP")
+            self.statusBar().showMessage(f"{kind_name}을 새로 불러왔습니다: {doc.name}", 5000)
             return
         try:
             text, enc, newline = read_text(doc.path)
@@ -1739,9 +1774,14 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"저장했습니다: {path}", 4000)
         return True
 
+    @staticmethod
+    def _kind_name(doc: Doc) -> str:
+        return {"pdf": "PDF", "image": "그림 파일", "hwp": "HWP 파일"}.get(doc.kind, "이 파일")
+
     def save(self, doc: Doc) -> bool:
         if doc.view_only:
-            self.statusBar().showMessage(f"{'PDF' if doc.is_pdf else '그림 파일'}은 보기만 하므로 저장할 것이 없습니다.", 4000)
+            extra = " MD로 바꾸면 고칠 수 있습니다." if doc.kind == "hwp" else ""
+            self.statusBar().showMessage(f"{self._kind_name(doc)}은 보기만 하므로 저장할 것이 없습니다.{extra}", 5000)
             return True
         if doc.path and doc.is_text:
             # 텍스트 파일은 같은 이름의 .md로 저장하고, 그 뒤로는 .md가 원본이 된다(원래 .txt는 그대로 둔다)
@@ -1758,7 +1798,7 @@ class MainWindow(QMainWindow):
 
     def save_as(self, doc: Doc) -> bool:
         if doc.view_only:
-            self.statusBar().showMessage(f"{'PDF' if doc.is_pdf else '그림 파일'}은 다른 이름으로 저장할 수 없습니다(보기만).", 4000)
+            self.statusBar().showMessage(f"{self._kind_name(doc)}은 다른 이름으로 저장할 수 없습니다(보기만).", 4000)
             return False
         if doc.path:
             start = str(doc.path.with_suffix(".md") if doc.is_text else doc.path)
@@ -2099,28 +2139,28 @@ class MainWindow(QMainWindow):
         if on:
             self.sync_scroll()  # 켜는 순간 뷰어를 편집기 위치로 맞춘다
 
-    # ---------- PDF → 마크다운 ----------
+    # ---------- PDF·HWP → 마크다운 ----------
     def convert_pdfs(self) -> None:
-        """체크한 PDF(없으면 지금 보는 PDF)를 PDF 옆에 '이름.md'로 바꿔 쓰고 목록에 올린다."""
+        """체크한 PDF·HWP(없으면 지금 보는 파일)를 원본 옆에 '이름.md'로 바꿔 쓰고 목록에 올린다."""
         if self._pdf2md is not None:
-            self.statusBar().showMessage("PDF를 마크다운으로 바꾸는 중입니다. 끝난 뒤 다시 하세요.", 4000)
+            self.statusBar().showMessage("마크다운으로 바꾸는 중입니다. 끝난 뒤 다시 하세요.", 4000)
             return
         checked = self._checked()
-        pdfs = [d.path for d in checked if d.is_pdf] or (
-            [self.current.path] if self.current is not None and self.current.is_pdf else []
+        srcs = [d.path for d in checked if d.kind in ("pdf", "hwp")] or (
+            [self.current.path] if self.current is not None and self.current.kind in ("pdf", "hwp") else []
         )
-        if not pdfs:
+        if not srcs:
             QMessageBox.information(
-                self, "PDF→MD", "바꿀 PDF가 없습니다.\nPDF 파일을 목록에 올려 체크하거나, PDF를 연 채로 다시 누르세요."
+                self, "MD로 바꾸기", "바꿀 파일이 없습니다.\nPDF·HWP 파일을 목록에 올려 체크하거나, 그 파일을 연 채로 다시 누르세요."
             )
             return
-        self._pdf2md_total, self._pdf2md_out, self._pdf2md_fail = len(pdfs), [], []
+        self._pdf2md_total, self._pdf2md_out, self._pdf2md_fail = len(srcs), [], []
         self.pdf2md_action.setEnabled(False)
         QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
-        self.statusBar().showMessage(f"PDF를 마크다운으로 바꾸는 중... (0/{len(pdfs)})")
+        self.statusBar().showMessage(f"마크다운으로 바꾸는 중... (0/{len(srcs)})")
         jobs: list[tuple[Path, Path]] = []
-        for pdf in pdfs:  # 쓸 이름을 미리 정한다(같은 묶음끼리도 겹치지 않게, 그림 폴더 이름도 여기서 정해짐)
-            jobs.append((pdf, pdf2md.md_path_for(pdf, {o for _p, o in jobs})))
+        for src in srcs:  # 쓸 이름을 미리 정한다(같은 묶음끼리도 겹치지 않게, 그림 폴더 이름도 여기서 정해짐)
+            jobs.append((src, pdf2md.md_path_for(src, {o for _p, o in jobs})))
         worker = PdfToMdWorker(jobs, self)
         worker.converted.connect(self._on_pdf_converted)
         worker.finished.connect(self._on_pdf2md_finished)
@@ -2141,7 +2181,7 @@ class MainWindow(QMainWindow):
             except OSError as e:
                 self._pdf2md_fail.append(f"{pdf.name}: {e}")
         done = len(self._pdf2md_out) + len(self._pdf2md_fail)
-        self.statusBar().showMessage(f"PDF를 마크다운으로 바꾸는 중... ({done}/{self._pdf2md_total})")
+        self.statusBar().showMessage(f"마크다운으로 바꾸는 중... ({done}/{self._pdf2md_total})")
 
     def _on_pdf2md_finished(self) -> None:
         self._pdf2md.deleteLater()
@@ -2151,11 +2191,11 @@ class MainWindow(QMainWindow):
         if self._pdf2md_out:
             self.open_paths([str(p) for p in self._pdf2md_out])
             names = ", ".join(p.name for p in self._pdf2md_out[:3]) + (" ..." if len(self._pdf2md_out) > 3 else "")
-            self.statusBar().showMessage(f"PDF {len(self._pdf2md_out)}개를 마크다운으로 바꿨습니다: {names}", 8000)
+            self.statusBar().showMessage(f"{len(self._pdf2md_out)}개를 마크다운으로 바꿨습니다: {names}", 8000)
         else:
             self.statusBar().clearMessage()
         if self._pdf2md_fail:
-            QMessageBox.warning(self, "PDF→MD", "바꾸지 못한 PDF가 있습니다.\n\n" + "\n".join(self._pdf2md_fail))
+            QMessageBox.warning(self, "MD로 바꾸기", "바꾸지 못한 파일이 있습니다.\n\n" + "\n".join(self._pdf2md_fail))
 
     # ---------- 인쇄·PDF ----------
     def _checked_docs(self, what: str) -> list[Doc]:

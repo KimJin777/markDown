@@ -2,7 +2,28 @@ from pathlib import Path
 
 import pymupdf
 
-from mdeditor.pdf2md import convert, images_dir_for, md_path_for
+from mdeditor.pdf2md import _is_xfa_fallback, convert, images_dir_for, md_path_for, xfa_markdown
+
+
+def test_xfa_fallback_detector():
+    assert _is_xfa_fallback("# Please wait... \n\nIf this message is not replaced ... Adobe Reader ...")
+    assert not _is_xfa_fallback("# 보통 문서\n\n본문입니다")
+
+
+def test_xfa_markdown_labels_and_values():
+    xml = (
+        "<xfa:datasets xmlns:xfa='http://www.xfa.org/schema/xfa-data/1.0/'><xfa:data>"
+        "<form1><Header><DOC_TITLE>특허출원서</DOC_TITLE></Header>"
+        "<a><L_1>【구분항목】</L_1><D_1>특허출원</D_1><D_2>100010</D_2></a>"
+        "<b><L_2>【빈항목】</L_2><D_3></D_3></b>"
+        "<c><D_4>라벨 없는 값</D_4></c>"
+        "</form1></xfa:data></xfa:datasets>"
+    )
+    md = xfa_markdown(xml)
+    assert "# 특허출원서" in md
+    assert "**【구분항목】** 특허출원 100010" in md
+    assert "【빈항목】" not in md  # 값 없는 항목은 뺀다
+    assert "라벨 없는 값" in md and md.startswith(">")  # 전자 양식 안내문으로 시작
 
 
 def test_md_named_after_pdf_without_overwrite(tmp_path: Path):
