@@ -7,6 +7,7 @@ import html
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -2192,6 +2193,20 @@ class MainWindow(QMainWindow):
             self.open_paths([str(p) for p in self._pdf2md_out])
             names = ", ".join(p.name for p in self._pdf2md_out[:3]) + (" ..." if len(self._pdf2md_out) > 3 else "")
             self.statusBar().showMessage(f"{len(self._pdf2md_out)}개를 마크다운으로 바꿨습니다: {names}", 8000)
+            # 어디에 저장됐는지 경로를 보여 준다(원본 옆) — [폴더 열기]로 바로 확인
+            paths = "\n".join(f"  • {p}" for p in self._pdf2md_out[:10]) + ("\n  ..." if len(self._pdf2md_out) > 10 else "")
+            box = QMessageBox(self)
+            box.setWindowTitle("MD로 바꾸기")
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setText(
+                f"{len(self._pdf2md_out)}개를 마크다운으로 바꿔 원본 옆에 저장했습니다.\n\n{paths}\n\n"
+                "그림이 있으면 옆 '이름_images' 폴더에 함께 있습니다. 바뀐 파일은 목록에도 올렸습니다."
+            )
+            open_btn = box.addButton("폴더 열기", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton("확인", QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() is open_btn:  # 탐색기에서 첫 파일을 골라 보여 준다
+                subprocess.Popen(["explorer", "/select,", str(self._pdf2md_out[0])])
         else:
             self.statusBar().clearMessage()
         if self._pdf2md_fail:
