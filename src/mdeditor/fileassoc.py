@@ -94,6 +94,27 @@ def is_registered(root: str = CLASSES) -> bool:
         return False
 
 
+def open_with_dialog(path: Path, hwnd: int = 0) -> bool:
+    """Windows '이 파일을 어떻게 여시겠어요?' 창을 띄운다(정식 API SHOpenWithDialog).
+    창이 떴으면 True(사용자가 취소해도 True), 못 띄웠으면 False.
+    예전의 rundll32 OpenAs_RunDLL은 최신 Windows 11에서 조용히 무시되어 이 API를 쓴다."""
+    if sys.platform != "win32":
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    class _OpenAsInfo(ctypes.Structure):
+        _fields_ = [("pcszFile", wintypes.LPCWSTR), ("pcszClass", wintypes.LPCWSTR), ("oaifInFlags", ctypes.c_int)]
+
+    # 등록 허용 | '항상' 선택을 확장자에 등록 | 고른 프로그램으로 바로 열기
+    flags = 0x1 | 0x2 | 0x4
+    try:
+        res = ctypes.windll.shell32.SHOpenWithDialog(hwnd, ctypes.byref(_OpenAsInfo(str(path), None, flags)))
+    except (AttributeError, OSError):
+        return False
+    return (res & 0xFFFFFFFF) in (0, 0x800704C7)  # S_OK 또는 사용자가 취소함(창은 떴음)
+
+
 # ---------- 탐색기 폴더 오른쪽 클릭 메뉴 ('mdEditor로 열기') ----------
 FOLDER_KEY = r"Directory\shell\mdEditor"
 FOLDER_MENU = "mdEditor로 열기"

@@ -2240,8 +2240,10 @@ class MainWindow(QMainWindow):
         else:
             sample = Path(tempfile.gettempdir()) / "mdEditor 연결 고르기.md"
             sample.write_text("# mdEditor\n", encoding="utf-8")
-        try:
-            subprocess.Popen(["rundll32.exe", "shell32.dll,OpenAs_RunDLL", str(sample)])
+        if fileassoc.open_with_dialog(sample, int(self.winId())):
+            return
+        try:  # 정식 API가 안 되면 Windows의 OpenWith 프로그램으로
+            subprocess.Popen(["OpenWith.exe", str(sample)])
         except OSError:
             QDesktopServices.openUrl(QUrl("ms-settings:defaultapps"))  # 설정 → 앱 → 기본 앱
 
