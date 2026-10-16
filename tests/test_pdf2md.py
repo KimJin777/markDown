@@ -17,6 +17,15 @@ def test_tidy_strips_picture_text_and_replacement_chars():
     assert "![](x/a.png)" in out and out.endswith("\n") and "\r" not in out
 
 
+def test_tidy_strips_struck_single_letters():
+    """장식 아이콘을 잘못 읽은 '취소선 알파벳 한 글자'는 지운다(식단표 PDF의 ~~e~~ ~~O~~ ~~D~~)."""
+    text = "|**샐러드/주스**<br>~~e~~|**모닝빵**<br>~~D~~|\n~~O~~\n~~지운 문장은 남긴다~~\n"
+    out = tidy(text)
+    assert "~~e~~" not in out and "~~D~~" not in out and "~~O~~" not in out
+    assert "**샐러드/주스**|" in out  # <br>까지 같이 치운다
+    assert "~~지운 문장은 남긴다~~" in out  # 진짜 취소선 글은 그대로
+
+
 def test_xfa_fallback_detector():
     assert _is_xfa_fallback("# Please wait... \n\nIf this message is not replaced ... Adobe Reader ...")
     assert not _is_xfa_fallback("# 보통 문서\n\n본문입니다")

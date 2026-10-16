@@ -147,7 +147,8 @@ def convert(pdf: Path, md: Path | None = None) -> str:
 def tidy(text: str) -> str:
     """변환 글 정리. '그림 속 글자' 블록은 통째로 뺀다 — 바로 위에 그림이 그대로 들어가 중복이고,
     로고·제목처럼 장식 글꼴인 그림은 글자가 깨져 나온다(파워포인트로 만든 PDF에서 흔함).
-    글꼴이 알려 주지 않아 못 읽은 글자(�)도 지운다."""
+    글꼴이 알려 주지 않아 못 읽은 글자(�)와, 장식 아이콘을 잘못 읽은 '취소선 알파벳 한 글자'(~~e~~)도 지운다."""
     text = re.sub(r"<!-- Start of picture text -->.*?<!-- End of picture text -->\n?", "", text, flags=re.S)
+    text = re.sub(r"(?:<br>)?~~\s*[A-Za-z]\s*~~", "", text)
     text = text.replace("�", "")
     return text.replace("\r\n", "\n").strip() + "\n"
