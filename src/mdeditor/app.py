@@ -60,7 +60,7 @@ from PySide6.QtWidgets import (
 
 from mdeditor import __version__
 from mdeditor.fmt import blank, find_all, insert_text, locate_in_source, next_match, py_to_q, q_to_py, set_heading, set_size, toggle_wrap
-from mdeditor import autosave, changelog, fileassoc, pdf2md, shortcut, single, symbols, update
+from mdeditor import autosave, changelog, fileassoc, icons, pdf2md, shortcut, single, symbols, update
 from mdeditor.render import IMAGE_SUFFIXES, kind_of, page, print_document, render_any, render_image
 
 MD_SUFFIXES = {".md", ".markdown", ".mdown", ".txt", ".json", ".yaml", ".yml", ".csv", ".tsv", ".pdf"} | IMAGE_SUFFIXES
@@ -747,6 +747,8 @@ class MainWindow(QMainWindow):
         self.sort_mode = str(self.settings.value("sortMode", "added"))
         self.sort_reverse = self.settings.value("sortReverse", False, type=bool)
 
+        self._tool_buttons: list[QToolButton] = []  # addWidget으로 넣은 단추(도구 줄 글자 보이기가 함께 바뀌게)
+
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setHandleWidth(6)
         self.splitter.setStyleSheet("QSplitter::handle { background: #d0d7de; } QSplitter::handle:hover { background: #8c959f; }")
@@ -863,6 +865,12 @@ class MainWindow(QMainWindow):
         self.restore_session_action.setChecked(self.settings.value("restoreSession", True, type=bool))
         self.restore_session_action.toggled.connect(lambda on: self.settings.setValue("restoreSession", on))
         v.addAction(self.restore_session_action)
+        # 도구 단추 글자: 켜면 아이콘 아래 글자, 끄면 아이콘만(겨누면 풍선 도움말)
+        self.toolbar_text_action = QAction("도구 단추에 글자 보이기", self, checkable=True)
+        self.toolbar_text_action.setToolTip("끄면 도구 줄 단추가 아이콘만으로 보입니다(단추에 마우스를 겨누면 설명이 뜸)")
+        self.toolbar_text_action.setChecked(self.settings.value("toolbarText", True, type=bool))
+        self.toolbar_text_action.toggled.connect(self._on_toolbar_text_toggled)
+        v.addAction(self.toolbar_text_action)
         v.addSeparator()
         act(v, "폴더 모두 펼치기", lambda: self.expand_folders(True))  # 목록에서 누른 폴더(없으면 모든 폴더)
         act(v, "폴더 모두 접기", lambda: self.expand_folders(False))
@@ -897,7 +905,9 @@ class MainWindow(QMainWindow):
         sort_btn = QToolButton()
         sort_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         sort_btn.setMenu(self.sort_menu)
+        sort_btn.setIcon(icons.get("sort"))
         sort_btn.setToolTip("파일 목록 정렬 기준")
+        self._tool_buttons.append(sort_btn)
 
         h = self.menuBar().addMenu("도움말(&H)")
         act(h, "새 기능·변경 이력...", lambda: self.show_changelog())
@@ -908,42 +918,69 @@ class MainWindow(QMainWindow):
         bar = self.addToolBar("도구")
         bar.setObjectName("toolbar")
         bar.setMovable(False)
-        bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        for a, label in (
-            (a_new, "새 파일"),
-            (a_open, "파일 올리기"),
-            (self.reload_action, "새로 불러오기"),
-            (self.reviewed_action, "검토완료"),
-            (self.select_all_action, "모두선택"),
-            (self.close_checked_action, "선택닫기"),
-            ("sort", None),
-            (a_save, "저장"),
-            (None, None),
-            (a_print, "인쇄"),
-            (a_pdf, "PDF로 저장"),
-            (self.pdf2md_action, "PDF→MD"),
+        for a, label, ic in (
+            (a_new, "새 파일", "new"),
+            (a_open, "파일 올리기", "open"),
+            (self.reload_action, "새로 불러오기", "reload"),
+            (self.reviewed_action, "검토완료", "reviewed"),
+            (self.select_all_action, "모두선택", "select_all"),
+            (self.close_checked_action, "선택닫기", "close"),
+            ("sort", None, None),
+            (a_save, "저장", "save"),
+            (None, None, None),
+            (a_print, "인쇄", "print"),
+            (a_pdf, "PDF로 저장", "pdf"),
+            (self.pdf2md_action, "PDF→MD", "pdf2md"),
         ):
             if a is None:
                 bar.addSeparator()
             elif a == "sort":
                 bar.addWidget(sort_btn)
             else:
+                a.setIcon(icons.get(ic))
+                a.setIconText(label)  # 도구 줄에서는 짧은 이름(메뉴에는 원래 이름 그대로)
                 bar.addAction(a)
-                bar.widgetForAction(a).setText(label)
                 sc = a.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
                 if sc and sc not in a.toolTip():  # 단축키를 풍선 도움말에 보인다(예: 저장 (Ctrl+S))
                     a.setToolTip(f"{label} ({sc})")
         self.sort_button = sort_btn
         self._update_sort_button()
+        self._apply_toolbar_style(self.toolbar_text_action.isChecked())
+
+    def _apply_toolbar_style(self, text_on: bool) -> None:
+        """도구 줄·서식 줄 단추 모양: 아이콘 아래 글자 ↔ 아이콘만."""
+        style = Qt.ToolButtonStyle.ToolButtonTextUnderIcon if text_on else Qt.ToolButtonStyle.ToolButtonIconOnly
+        for bar in (*self.findChildren(QToolBar, "toolbar"), self.format_bar):
+            bar.setToolButtonStyle(style)
+        for btn in self._tool_buttons:  # addWidget으로 넣은 단추는 줄 설정을 따라오지 않아 따로 바꾼다
+            btn.setToolButtonStyle(style)
+
+    def _on_toolbar_text_toggled(self, on: bool) -> None:
+        self.settings.setValue("toolbarText", on)
+        self._apply_toolbar_style(on)
+        self.statusBar().showMessage(
+            "도구 단추에 글자를 보입니다." if on else "도구 단추를 아이콘만으로 보입니다 — 마우스를 겨누면 설명이 뜹니다.", 4000
+        )
 
     # ---------- 서식 버튼(오른쪽 위) — 왼쪽 원본에서 선택한 글자에 적용 ----------
     def _build_format_bar(self) -> QToolBar:
         bar = QToolBar("서식")
-        bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         bar.setStyleSheet("QToolBar { border-bottom: 1px solid #d0d7de; spacing: 2px; }")
+        # 보기 메뉴에도 들어가는 공용 동작들의 아이콘(도구 줄·메뉴 양쪽에 보임)
+        for action, name in (
+            (self.source_action, "source"),
+            (self.toc_action, "toc"),
+            (self.sync_action, "sync"),
+            (self.a4_action, "a4"),
+            (self.slides_action, "image"),
+            (self.fullscreen_action, "fullscreen"),
+        ):
+            action.setIcon(icons.get(name))
 
         size_btn = QToolButton()
         size_btn.setText("글자 크기")
+        size_btn.setIcon(icons.get("size"))
+        self._tool_buttons.append(size_btn)
         size_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         menu = QMenu(size_btn)
         for level in (1, 2, 3):
@@ -958,8 +995,9 @@ class MainWindow(QMainWindow):
         bar.addWidget(size_btn)
         bar.addSeparator()
 
-        def fmt_action(text: str, tip: str, left: str, right: str | None, shortcut: str | None, bold=False, italic=False, under=False, strike=False):
+        def fmt_action(text: str, tip: str, left: str, right: str | None, shortcut: str | None, icon: str, bold=False, italic=False, under=False, strike=False):
             a = QAction(text, self)
+            a.setIcon(icons.get(icon))
             f = a.font()
             f.setBold(bold)
             f.setItalic(italic)
@@ -972,10 +1010,10 @@ class MainWindow(QMainWindow):
             a.triggered.connect(lambda: self.apply_format(lambda t, s, e: toggle_wrap(t, s, e, left, right)))
             bar.addAction(a)
 
-        fmt_action("굵게", "굵게", "**", None, "Ctrl+B", bold=True)
-        fmt_action("기울임", "기울임", "*", None, "Ctrl+I", italic=True)
-        fmt_action("밑줄", "밑줄", "<u>", "</u>", "Ctrl+U", under=True)
-        fmt_action("취소선", "취소선", "~~", None, None, strike=True)
+        fmt_action("굵게", "굵게", "**", None, "Ctrl+B", "bold", bold=True)
+        fmt_action("기울임", "기울임", "*", None, "Ctrl+I", "italic", italic=True)
+        fmt_action("밑줄", "밑줄", "<u>", "</u>", "Ctrl+U", "underline", under=True)
+        fmt_action("취소선", "취소선", "~~", None, None, "strike", strike=True)
         bar.addSeparator()
 
         # 빈칸: 마크다운은 빈칸을 하나로 줄이므로 &emsp;로 넣는다. 선택한 글자가 있으면 그 자리를 빈칸으로(문제 만들기)
@@ -991,6 +1029,8 @@ class MainWindow(QMainWindow):
         self.blank_menu.addAction("괄호 빈칸 (    )", lambda: self.insert("(" + blank(4, False) + ")"))
         blank_btn = QToolButton()
         blank_btn.setText("빈칸")
+        blank_btn.setIcon(icons.get("blank"))
+        self._tool_buttons.append(blank_btn)
         blank_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         blank_btn.setMenu(self.blank_menu)
         blank_btn.clicked.connect(lambda: self.insert(blank(6)))
@@ -1001,6 +1041,7 @@ class MainWindow(QMainWindow):
         bar.addWidget(blank_btn)
 
         self.symbol_action = QAction("특수기호", self)
+        self.symbol_action.setIcon(icons.get("symbol"))
         self.symbol_action.setShortcut("Ctrl+F10")
         self.symbol_action.setToolTip("특수기호(※ ① → ± ℃ …)를 골라 커서 자리에 넣습니다 (Ctrl+F10)")
         self.symbol_action.triggered.connect(self.show_symbols)
@@ -1013,7 +1054,7 @@ class MainWindow(QMainWindow):
         bar.addSeparator()
         bar.addAction(self.slides_action)
         bar.addAction(self.fullscreen_action)
-        bar.widgetForAction(self.fullscreen_action).setText("전체 화면")
+        self.fullscreen_action.setIconText("전체 화면")
         return bar
 
     def _on_focus_changed(self, _old, new) -> None:
