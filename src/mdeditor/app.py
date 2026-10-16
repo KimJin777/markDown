@@ -60,7 +60,7 @@ from PySide6.QtWidgets import (
 
 from mdeditor import __version__
 from mdeditor.fmt import blank, find_all, insert_text, locate_in_source, next_match, py_to_q, q_to_py, set_heading, set_size, toggle_wrap
-from mdeditor import changelog, fileassoc, pdf2md, shortcut, single, symbols, update
+from mdeditor import autosave, changelog, fileassoc, pdf2md, shortcut, single, symbols, update
 from mdeditor.render import IMAGE_SUFFIXES, kind_of, page, print_document, render_any, render_image
 
 MD_SUFFIXES = {".md", ".markdown", ".mdown", ".txt", ".json", ".yaml", ".yml", ".csv", ".tsv", ".pdf"} | IMAGE_SUFFIXES
@@ -482,6 +482,27 @@ class Doc:
         return self.qdoc.toPlainText() != self.saved_text
 
 
+RENDER_BG_CHARS = 50_000  # 이보다 큰 문서는 화면 밖 스레드에서 HTML을 만든다(타자가 덜 막히게)
+
+
+def render_delay(chars: int) -> int:
+    """타자를 멈춘 뒤 뷰어를 다시 그리기까지 기다리는 시간(ms). 문서가 클수록 더 미룬다."""
+    return 150 if chars < 50_000 else 300 if chars < 200_000 else 600
+
+
+class RenderWorker(QThread):
+    """큰 문서의 본문 HTML을 화면 밖 스레드에서 만든다(만드는 동안 타자·스크롤이 덜 막힘)."""
+
+    done = Signal(int, str)  # (요청 번호, 본문 HTML)
+
+    def __init__(self, seq: int, text: str, base_dir: Path | None, kind: str, parent=None) -> None:
+        super().__init__(parent)
+        self.seq, self.text, self.base_dir, self.kind = seq, text, base_dir, kind
+
+    def run(self) -> None:
+        self.done.emit(self.seq, render_any(self.text, self.base_dir, self.kind))
+
+
 class PdfToMdWorker(QThread):
     """PDF를 마크다운으로 바꾸는 일을 화면 밖 스레드에서 한다(쪽이 많으면 몇 초 걸림)."""
 
@@ -707,6 +728,18 @@ class MainWindow(QMainWindow):
         self._asking_reload = False
         self._reloading = False  # 새로 불러와 본문을 바꾸는 중(내가 고친 것으로 치지 않음)
 
+        # 자동 백업: 저장 안 된 문서를 30초마다 적어 둔다(갑자기 꺼져도 다음 실행 때 복구)
+        self._backup_dir = autosave.backup_dir(
+            Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation))
+        )
+        self._backup_sig: int | None = None
+        self.autosave_timer = QTimer(self, interval=30_000)
+        self.autosave_timer.timeout.connect(self._write_backup)
+        self.autosave_timer.start()
+
+        self._render_seq = 0  # 뷰어 그리기 요청 번호(화면 밖 스레드가 끝났을 때 더 새 요청이 있으면 버린다)
+        self._render_jobs: list[RenderWorker] = []
+
         self.roots: list[Path] = []  # 폴더 올리기로 올린 폴더(트리 뿌리)
         self._items: dict[int, QTreeWidgetItem] = {}  # id(문서) → 목록 칸
         self._collapsed: set[str] = set()  # 접어 둔 폴더
@@ -753,6 +786,7 @@ class MainWindow(QMainWindow):
         self._restore()
         self.editor.setVisible(self.source_action.isChecked())  # 소스 켬/끔 상태 복원
         self.new_file()
+        self._restore_session()  # 지난번에 열어 둔 파일 목록(경로만 기억) 다시 열기
 
     # ---------- 메뉴 ----------
     def _build_menu(self) -> None:
@@ -823,6 +857,12 @@ class MainWindow(QMainWindow):
         self.auto_reload_action.setChecked(self.settings.value("autoReload", False, type=bool))
         self.auto_reload_action.toggled.connect(self._on_auto_reload_toggled)
         v.addAction(self.auto_reload_action)
+        # 지난 파일 목록 기억: 끌 때 열려 있던 파일을 다음 실행 때 그대로 다시 연다(경로만 기억 — 메모리 추가 사용 없음)
+        self.restore_session_action = QAction("지난 파일 목록 기억하기", self, checkable=True)
+        self.restore_session_action.setToolTip("켜면 끌 때 열려 있던 파일 목록을 다음 실행 때 그대로 다시 엽니다")
+        self.restore_session_action.setChecked(self.settings.value("restoreSession", True, type=bool))
+        self.restore_session_action.toggled.connect(lambda on: self.settings.setValue("restoreSession", on))
+        v.addAction(self.restore_session_action)
         v.addSeparator()
         act(v, "폴더 모두 펼치기", lambda: self.expand_folders(True))  # 목록에서 누른 폴더(없으면 모든 폴더)
         act(v, "폴더 모두 접기", lambda: self.expand_folders(False))
@@ -1757,9 +1797,96 @@ class MainWindow(QMainWindow):
             return
         if self._pdf2md is not None:  # 바꾸는 중인 스레드를 두고 닫으면 프로그램이 죽는다
             self._pdf2md.wait()
+        for w in self._render_jobs:  # 뷰어 그리는 스레드도 마찬가지
+            w.wait()
+        self._save_session()
+        try:
+            autosave.clear(self._backup_dir)  # 정상 종료: 복구할 것이 없다
+        except OSError:
+            pass
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("splitter", self.splitter.saveState())
         e.accept()
+
+    # ---------- 지난 파일 목록 기억·자동 백업 ----------
+    def _settings_list(self, key: str) -> list[str]:
+        v = self.settings.value(key, [])
+        return [v] if isinstance(v, str) else [str(x) for x in (v or [])]  # 항목 1개는 str로 돌아오기도 한다
+
+    def _save_session(self) -> None:
+        self.settings.setValue("sessionFiles", [str(d.path) for d in self.docs if d.path])
+        self.settings.setValue("sessionRoots", [str(r) for r in self.roots])
+        self.settings.setValue("sessionCurrent", str(self.current.path) if self.current is not None and self.current.path else "")
+
+    def _restore_session(self) -> None:
+        """지난번에 끌 때 열어 둔 파일 목록을 다시 연다(경로만 기억해 두므로 메모리를 더 쓰지 않는다)."""
+        if not self.restore_session_action.isChecked():
+            return
+        files = [p for p in self._settings_list("sessionFiles") if Path(p).is_file()]
+        if not files:
+            return
+        self.roots = [Path(r) for r in self._settings_list("sessionRoots") if Path(r).is_dir()]
+        self.open_paths(files)
+        cur = str(self.settings.value("sessionCurrent", ""))
+        doc = next((d for d in self.docs if d.path and str(d.path) == cur), None)
+        if doc is not None and (item := self._item_of(doc)):
+            self.files.setCurrentItem(item)
+
+    def _write_backup(self) -> None:
+        """30초마다: 저장 안 된 문서를 백업에 적어 두고, 갑자기 꺼졌을 때를 대비해 파일 목록도 기억한다."""
+        self._save_session()
+        dirty = [
+            (str(d.path) if d.path else None, d.name, d.qdoc.toPlainText()) for d in self.docs if d.dirty and not d.view_only
+        ]
+        sig = hash(tuple(dirty))
+        if sig == self._backup_sig:  # 지난 백업과 같으면 디스크를 건드리지 않는다
+            return
+        self._backup_sig = sig
+        try:
+            if dirty:
+                autosave.write_snapshot(self._backup_dir, dirty)
+            else:
+                autosave.clear(self._backup_dir)
+        except OSError:
+            pass  # 백업이 안 돼도 프로그램은 계속
+
+    def offer_recovery(self) -> None:
+        """켤 때: 백업이 남아 있으면 지난 실행이 제대로 끝나지 않은 것 — 복구할지 묻는다."""
+        entries = autosave.read_snapshot(self._backup_dir)
+        if not entries:
+            return
+        names = "\n".join(f"  • {e['name']}" for e in entries[:10]) + ("\n  ..." if len(entries) > 10 else "")
+        r = QMessageBox.question(
+            self,
+            "저장하지 않은 내용 복구",
+            "지난번에 프로그램이 제대로 닫히지 않았습니다.\n저장하지 않았던 내용이 백업에 남아 있습니다.\n"
+            f"{names}\n\n복구할까요? (복구한 내용은 저장(Ctrl+S)해야 파일에 적힙니다)",
+        )
+        if r == QMessageBox.StandardButton.Yes:
+            for e in entries:
+                self._recover_doc(e)
+        try:
+            autosave.clear(self._backup_dir)
+        except OSError:
+            pass
+        self._backup_sig = None
+
+    def _recover_doc(self, e: dict) -> None:
+        """백업 하나를 목록에 되살린다. 원본 파일이 있으면 그 문서에 백업 본문을 끼워 넣는다(저장은 사용자가)."""
+        path = Path(e["path"]) if e.get("path") else None
+        doc = next((d for d in self.docs if path is not None and d.path == path), None)
+        if doc is None and path is not None and path.is_file():
+            self.open_paths([str(path)])
+            doc = next((d for d in self.docs if d.path == path), None)
+        if doc is None:  # 원본이 지워졌거나 저장한 적 없는 새 문서 → 새 문서로 올린다
+            self.untitled_count += 1
+            doc = Doc(path=None, untitled_no=self.untitled_count)
+            self._add_doc(doc)
+        if doc.qdoc.toPlainText() != e["text"]:
+            cur = QTextCursor(doc.qdoc)
+            cur.select(QTextCursor.SelectionType.Document)
+            cur.insertText(e["text"])  # 되돌리기(Ctrl+Z)가 되게 끼워 넣는다
+        self._refresh_item(doc)
 
     # ---------- 뷰어 ----------
     def _on_preview_loaded(self, ok: bool) -> None:
@@ -1838,6 +1965,8 @@ class MainWindow(QMainWindow):
         self.render_preview()
 
     def _on_text_changed(self) -> None:
+        if self.current is not None:  # 큰 문서는 조금 더 기다렸다 그린다(타자 중 매번 전체를 만드는 부담을 줄임)
+            self.render_timer.setInterval(render_delay(self.current.qdoc.characterCount()))
         self.render_timer.start()
 
     def render_preview(self) -> None:
@@ -1847,6 +1976,7 @@ class MainWindow(QMainWindow):
         self.viewer_stack.setCurrentWidget(self.preview)
         if not self._preview_ready or self.current is None:
             return
+        self._render_seq += 1  # 더 새 요청이 생기면 아직 그리는 중이던 결과는 버린다
         if self.current.is_text:  # 텍스트 파일은 원본 창에만 — 저장하면 .md가 되어 뷰어에 나온다
             md_name = self.current.path.with_suffix(".md").name
             body = (
@@ -1860,7 +1990,28 @@ class MainWindow(QMainWindow):
             stamp = file_stamp(self.current.path)
             body = render_image(self.current.path.name, self.current.base_dir, int((stamp or (0, 0))[0] * 1000))
         else:
-            body = render_any(self.current.qdoc.toPlainText(), self.current.base_dir, self.current.kind)
+            text = self.current.qdoc.toPlainText()
+            if len(text) > RENDER_BG_CHARS:  # 큰 문서: 화면 밖 스레드에서 만든다
+                worker = RenderWorker(self._render_seq, text, self.current.base_dir, self.current.kind, self)
+                worker.done.connect(self._on_rendered)
+                worker.finished.connect(lambda w=worker: self._render_finished(w))
+                self._render_jobs.append(worker)
+                worker.start()
+                return
+            body = render_any(text, self.current.base_dir, self.current.kind)
+        self._send_body(body)
+
+    def _on_rendered(self, seq: int, body: str) -> None:
+        """화면 밖 스레드가 만든 본문. 그 사이 더 새 요청이 생겼으면(글을 더 고침·다른 파일로 감) 버린다."""
+        if seq == self._render_seq and self.current is not None and self._preview_ready:
+            self._send_body(body)
+
+    def _render_finished(self, worker: RenderWorker) -> None:
+        if worker in self._render_jobs:
+            self._render_jobs.remove(worker)
+        worker.deleteLater()
+
+    def _send_body(self, body: str) -> None:
         lines = self.current.qdoc.blockCount()
         changed = json.dumps(self.current.changed_lines)
         guide = "true" if self.a4_action.isChecked() and not self.current.is_text else "false"
@@ -2377,6 +2528,7 @@ def main() -> None:
     win._single = single.listen(win.receive_paths, parent=win)  # 다음에 실행되는 mdEditor가 넘기는 파일을 받는다
     if paths:
         win.open_paths(paths)
+    QTimer.singleShot(800, win.offer_recovery)  # 지난 실행이 갑자기 꺼졌으면 저장 안 했던 내용 복구를 묻는다
     QTimer.singleShot(1500, lambda: win.make_shortcut(first_run=True))  # 창이 뜬 뒤에
     QTimer.singleShot(2500, win.show_whats_new)  # 새 버전으로 처음 켰으면 바뀐 내용을 보여 준다
     sys.exit(app.exec())
