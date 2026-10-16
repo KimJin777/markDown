@@ -141,5 +141,13 @@ def convert(pdf: Path, md: Path | None = None) -> str:
         return f"]({img_dir.name}/{name})"
 
     text = re.sub(r"\]\(data:image/(\w+);base64,([A-Za-z0-9+/=\s]+)\)", save, text)
-    text = re.sub(r"<!-- (?:Start|End) of picture text -->\n?", "", text)  # 그림 속 글자 표시 주석은 잡음
+    return tidy(text)
+
+
+def tidy(text: str) -> str:
+    """변환 글 정리. '그림 속 글자' 블록은 통째로 뺀다 — 바로 위에 그림이 그대로 들어가 중복이고,
+    로고·제목처럼 장식 글꼴인 그림은 글자가 깨져 나온다(파워포인트로 만든 PDF에서 흔함).
+    글꼴이 알려 주지 않아 못 읽은 글자(�)도 지운다."""
+    text = re.sub(r"<!-- Start of picture text -->.*?<!-- End of picture text -->\n?", "", text, flags=re.S)
+    text = text.replace("�", "")
     return text.replace("\r\n", "\n").strip() + "\n"

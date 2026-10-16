@@ -2,7 +2,19 @@ from pathlib import Path
 
 import pymupdf
 
-from mdeditor.pdf2md import _is_xfa_fallback, convert, images_dir_for, md_path_for, xfa_markdown
+from mdeditor.pdf2md import _is_xfa_fallback, convert, images_dir_for, md_path_for, tidy, xfa_markdown
+
+
+def test_tidy_strips_picture_text_and_replacement_chars():
+    text = (
+        "본문\n\n![](x/a.png)\n\n"
+        "<!-- Start of picture text -->\n=) aed 06<br>Dongwon oe nel<br>\n<!-- End of picture text -->\n"
+        "표 � 글자\r\n"
+    )
+    out = tidy(text)
+    assert "Dongwon" not in out and "picture text" not in out  # 그림 속 깨진 글자 블록은 통째로 뺀다
+    assert "�" not in out and "표  글자" in out
+    assert "![](x/a.png)" in out and out.endswith("\n") and "\r" not in out
 
 
 def test_xfa_fallback_detector():
