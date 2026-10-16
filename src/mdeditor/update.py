@@ -41,13 +41,16 @@ def is_newer(remote: str, current: str) -> bool:
 
 def check(current: str, timeout: float = 6) -> tuple[str, str]:
     """(최신 버전, 지금 버전 다음부터 바뀐 내용). 인터넷이 안 되면 OSError."""
-    latest = parse_version(_get(f"{RAW}/pyproject.toml", timeout))
+    import time
+
+    bust = f"?nocache={int(time.time())}"  # raw 주소는 CDN이 5분쯤 캐시해, 방금 나온 버전을 못 볼 수 있다
+    latest = parse_version(_get(f"{RAW}/pyproject.toml{bust}", timeout))
     if not latest:
         raise OSError("저장소에서 버전을 읽지 못했습니다")
     notes = ""
     if is_newer(latest, current):
         try:
-            notes = changelog.changes_since(_get(f"{RAW}/CHANGELOG.md", timeout), current, latest)
+            notes = changelog.changes_since(_get(f"{RAW}/CHANGELOG.md{bust}", timeout), current, latest)
         except OSError:
             pass
     return latest, notes

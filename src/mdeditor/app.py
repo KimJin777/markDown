@@ -7,7 +7,6 @@ import html
 import json
 import os
 import re
-import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -2218,13 +2217,19 @@ class MainWindow(QMainWindow):
         except OSError as e:
             QMessageBox.warning(self, title, f"등록하지 못했습니다.\n{e}")
             return
+        if sys.getwindowsversion().build >= 22000:  # Windows 11: 고르기 창에 '항상'이 없어 설정에서 고른다
+            steps = (
+                "[지금 고르기]를 누르면 Windows 설정의 mdEditor 기본 앱 페이지가 열립니다.\n"
+                ".md를 누르고 mdEditor를 고른 뒤 [기본값 설정]을 누르세요(.markdown·.mdown도 같게 할 수 있음)."
+            )
+        else:
+            steps = "[지금 고르기]를 누르면 나오는 창에서 mdEditor를 고르고 '항상'을 누르세요."
         box = QMessageBox(self)
         box.setWindowTitle(title)
         box.setIcon(QMessageBox.Icon.Information)
         box.setText(
             "mdEditor를 .md 파일의 '연결 프로그램'에 올렸습니다.\n\n"
-            "마지막으로 Windows에서 한 번만 고르면 됩니다(Windows가 프로그램이 직접 바꾸는 것을 막아 둠).\n"
-            "[지금 고르기]를 누르면 나오는 창에서 mdEditor를 고르고 '항상'을 누르세요."
+            f"마지막으로 한 번만 고르면 됩니다(Windows가 프로그램이 직접 바꾸는 것을 막아 둠).\n{steps}"
         )
         pick = box.addButton("지금 고르기", QMessageBox.ButtonRole.AcceptRole)
         box.addButton("나중에", QMessageBox.ButtonRole.RejectRole)
@@ -2233,18 +2238,18 @@ class MainWindow(QMainWindow):
             self._pick_default_app()
 
     def _pick_default_app(self) -> None:
-        """'이 파일을 어떻게 여시겠어요?' 창. .md 파일이 하나 있어야 해서, 보던 .md가 없으면 임시 파일을 쓴다."""
+        """기본 앱 고르기. Windows 11은 프로그램이 띄우는 고르기 창에 '항상'이 없어(기본 앱 직접 변경 차단)
+        설정의 mdEditor 기본 앱 페이지를 연다. 그 전 Windows는 '어떻게 여시겠어요?' 창을 띄운다."""
+        if sys.getwindowsversion().build >= 22000:  # Windows 11 (등록은 register()의 Capabilities가 해 둠)
+            QDesktopServices.openUrl(QUrl("ms-settings:defaultapps?registeredAppUser=mdEditor"))
+            return
         d = self.current
         if d is not None and d.path and d.path.suffix.lower() == ".md" and d.path.exists():
             sample = d.path
         else:
             sample = Path(tempfile.gettempdir()) / "mdEditor 연결 고르기.md"
             sample.write_text("# mdEditor\n", encoding="utf-8")
-        if fileassoc.open_with_dialog(sample, int(self.winId())):
-            return
-        try:  # 정식 API가 안 되면 Windows의 OpenWith 프로그램으로
-            subprocess.Popen(["OpenWith.exe", str(sample)])
-        except OSError:
+        if not fileassoc.open_with_dialog(sample, int(self.winId())):
             QDesktopServices.openUrl(QUrl("ms-settings:defaultapps"))  # 설정 → 앱 → 기본 앱
 
     def register_folder_menu(self) -> None:

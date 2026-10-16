@@ -30,6 +30,21 @@ def registry_entries(exe: Path, icon: Path | None) -> list[tuple[str, str, str |
     return entries
 
 
+def capability_entries(software: str = "Software") -> list[tuple[str, str, str]]:
+    """HKCU 기준 (키, 값 이름, 값). Windows 설정 → 앱 → 기본 앱 목록에 mdEditor가 나오게 하는 정식 등록.
+    Windows 11은 프로그램이 기본 앱을 직접 바꾸지 못하게 막아 두어, 이 등록 뒤 설정의
+    mdEditor 페이지(ms-settings:defaultapps?registeredAppUser=mdEditor)에서 사용자가 고른다."""
+    cap = rf"{software}\mdEditor\Capabilities"
+    entries = [
+        (cap, "ApplicationName", "mdEditor"),
+        (cap, "ApplicationDescription", "마크다운 편집기 — [파일 목록 | 원본 | 뷰어]"),
+        (rf"{software}\RegisteredApplications", "mdEditor", cap),
+    ]
+    for ext in EXTENSIONS:
+        entries.append((rf"{cap}\FileAssociations", ext, PROG_ID))
+    return entries
+
+
 def _notify() -> None:
     """탐색기에 '연결이 바뀌었다'고 알린다(아이콘·연결 프로그램 목록을 새로 읽게)."""
     try:
@@ -40,7 +55,7 @@ def _notify() -> None:
         pass
 
 
-def register(exe: Path, icon: Path | None = None, root: str = CLASSES) -> None:
+def register(exe: Path, icon: Path | None = None, root: str = CLASSES, software: str = "Software") -> None:
     import winreg
 
     for key, name, value in registry_entries(exe, icon):
@@ -49,6 +64,9 @@ def register(exe: Path, icon: Path | None = None, root: str = CLASSES) -> None:
                 winreg.SetValueEx(k, name, 0, winreg.REG_NONE, b"")
             else:
                 winreg.SetValueEx(k, name, 0, winreg.REG_SZ, value)
+    for key, name, value in capability_entries(software):
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key) as k:
+            winreg.SetValueEx(k, name, 0, winreg.REG_SZ, value)
     _notify()
 
 
@@ -66,7 +84,7 @@ def _delete_tree(winreg, root, path: str) -> None:
         pass
 
 
-def unregister(exe_name: str = "mdEditor.exe", root: str = CLASSES) -> None:
+def unregister(exe_name: str = "mdEditor.exe", root: str = CLASSES, software: str = "Software") -> None:
     """등록한 것만 지운다(.md 키 자체나 다른 프로그램 연결은 건드리지 않음)."""
     import winreg
 
@@ -79,6 +97,12 @@ def unregister(exe_name: str = "mdEditor.exe", root: str = CLASSES) -> None:
                 winreg.DeleteValue(k, PROG_ID)
         except FileNotFoundError:
             pass
+    _delete_tree(winreg, hk, rf"{software}\mdEditor")  # 설정 '기본 앱' 목록 등록도 지운다
+    try:
+        with winreg.OpenKey(hk, rf"{software}\RegisteredApplications", 0, winreg.KEY_SET_VALUE) as k:
+            winreg.DeleteValue(k, "mdEditor")
+    except FileNotFoundError:
+        pass
     _notify()
 
 
