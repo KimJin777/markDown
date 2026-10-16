@@ -92,3 +92,45 @@ def is_registered(root: str = CLASSES) -> bool:
             return True
     except FileNotFoundError:
         return False
+
+
+# ---------- 탐색기 폴더 오른쪽 클릭 메뉴 ('mdEditor로 열기') ----------
+FOLDER_KEY = r"Directory\shell\mdEditor"
+FOLDER_MENU = "mdEditor로 열기"
+
+
+def folder_menu_entries(exe: Path, icon: Path | None) -> list[tuple[str, str, str]]:
+    """(키, 값 이름, 값) — 폴더를 오른쪽 클릭하면 'mdEditor로 열기'가 나오고, 누르면 그 폴더가 넘어온다."""
+    return [
+        (FOLDER_KEY, "", FOLDER_MENU),
+        (FOLDER_KEY, "Icon", f"{icon or exe},0"),
+        (rf"{FOLDER_KEY}\command", "", f'"{exe}" "%1"'),
+    ]
+
+
+def register_folder_menu(exe: Path, icon: Path | None = None, root: str = CLASSES) -> None:
+    import winreg
+
+    for key, name, value in folder_menu_entries(exe, icon):
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{root}\{key}") as k:
+            winreg.SetValueEx(k, name, 0, winreg.REG_SZ, value)
+    _notify()
+
+
+def unregister_folder_menu(root: str = CLASSES) -> None:
+    import winreg
+
+    _delete_tree(winreg, winreg.HKEY_CURRENT_USER, rf"{root}\{FOLDER_KEY}")
+    _notify()
+
+
+def folder_menu_registered(root: str = CLASSES) -> bool:
+    if sys.platform != "win32":
+        return False
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"{root}\{FOLDER_KEY}\command"):
+            return True
+    except FileNotFoundError:
+        return False

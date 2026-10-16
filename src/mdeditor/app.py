@@ -795,6 +795,9 @@ class MainWindow(QMainWindow):
         act(f, "바탕화면에 바로가기 만들기", lambda: self.make_shortcut())
         act(f, ".md 파일을 mdEditor로 열기 등록...", self.register_file_assoc)
         act(f, ".md 파일 연결 등록 해제", self.unregister_file_assoc)
+        a_fm = act(f, "폴더 오른쪽 클릭에 'mdEditor로 열기' 추가...", self.register_folder_menu)
+        a_fm.setToolTip("탐색기에서 폴더를 오른쪽 클릭하면 'mdEditor로 열기'가 나오게 등록합니다(지금 사용자만)")
+        act(f, "폴더 오른쪽 클릭 메뉴에서 빼기", self.unregister_folder_menu)
         f.addSeparator()
         act(f, "끝내기", self.close, "Ctrl+Q")
 
@@ -2241,6 +2244,34 @@ class MainWindow(QMainWindow):
             subprocess.Popen(["rundll32.exe", "shell32.dll,OpenAs_RunDLL", str(sample)])
         except OSError:
             QDesktopServices.openUrl(QUrl("ms-settings:defaultapps"))  # 설정 → 앱 → 기본 앱
+
+    def register_folder_menu(self) -> None:
+        """탐색기에서 폴더를 오른쪽 클릭하면 'mdEditor로 열기'가 나오게 등록한다(지금 사용자의 레지스트리만)."""
+        title = "폴더 오른쪽 클릭 메뉴"
+        exe = shortcut.launcher_path()
+        if exe is None:
+            QMessageBox.information(self, title, "개발용 실행에서는 등록하지 않습니다.\n설치한 mdEditor(또는 실행 파일)로 실행해 주세요.")
+            return
+        try:
+            fileassoc.register_folder_menu(exe, ICON if ICON.exists() else None)
+        except OSError as e:
+            QMessageBox.warning(self, title, f"등록하지 못했습니다.\n{e}")
+            return
+        QMessageBox.information(
+            self,
+            title,
+            "탐색기에서 폴더를 오른쪽 클릭하면 'mdEditor로 열기'가 나옵니다.\n"
+            "누르면 그 폴더가 하위 폴더까지 파일 목록에 트리로 올라갑니다(켜져 있으면 그 창에).\n\n"
+            "Windows 11의 간단한 메뉴에는 안 보일 수 있습니다 — '더 많은 옵션 표시'(또는 Shift+오른쪽 클릭)를 누르면 보입니다.",
+        )
+
+    def unregister_folder_menu(self) -> None:
+        try:
+            fileassoc.unregister_folder_menu()
+        except OSError as e:
+            QMessageBox.warning(self, "폴더 오른쪽 클릭 메뉴", f"빼지 못했습니다.\n{e}")
+            return
+        QMessageBox.information(self, "폴더 오른쪽 클릭 메뉴", "폴더 오른쪽 클릭 메뉴에서 'mdEditor로 열기'를 뺐습니다.")
 
     def unregister_file_assoc(self) -> None:
         try:

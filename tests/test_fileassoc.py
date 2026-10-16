@@ -17,6 +17,28 @@ def test_entries_open_with_quoted_path():
         assert (rf"{ext}\OpenWithProgids", "mdEditor.md") in entries
 
 
+def test_folder_menu_entries_open_folder():
+    entries = {(k, n): v for k, n, v in fileassoc.folder_menu_entries(EXE, Path(r"C:\x\icon.ico"))}
+    assert entries[(r"Directory\shell\mdEditor", "")] == "mdEditor로 열기"
+    assert entries[(r"Directory\shell\mdEditor", "Icon")] == r"C:\x\icon.ico,0"
+    assert entries[(r"Directory\shell\mdEditor\command", "")] == f'"{EXE}" "%1"'
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows 레지스트리")
+def test_folder_menu_register_and_unregister_roundtrip():
+    import winreg
+
+    try:
+        fileassoc.register_folder_menu(EXE, None, root=TEST_ROOT)
+        assert fileassoc.folder_menu_registered(root=TEST_ROOT)
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"{TEST_ROOT}\Directory\shell\mdEditor\command") as k:
+            assert winreg.QueryValueEx(k, "")[0] == f'"{EXE}" "%1"'
+        fileassoc.unregister_folder_menu(root=TEST_ROOT)
+        assert not fileassoc.folder_menu_registered(root=TEST_ROOT)
+    finally:
+        fileassoc._delete_tree(winreg, winreg.HKEY_CURRENT_USER, r"Software\mdEditorTest")
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows 레지스트리")
 def test_register_and_unregister_roundtrip():
     import winreg
