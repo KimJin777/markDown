@@ -28,17 +28,23 @@ def test_code_block_highlighted_and_unknown_lang_escaped():
     assert "&lt;b&gt;" in html
 
 
-def test_mermaid_flowchart_tb_becomes_diagram_block():
-    html = render_body("앞\n\n```mermaid\nflowchart TB\n  A[시작] --> B[끝]\n```\n")
-    assert '<pre class="mermaid" data-line="2">' in html
-    assert "flowchart TB" in html and "A[시작] --&gt; B[끝]" in html
-    assert 'class="language-mermaid"' not in html
+def test_all_mermaid_diagram_types_become_diagram_blocks():
+    sources = [
+        "flowchart TB\n  A[시작] --> B[끝]",
+        "sequenceDiagram\n  사용자->>앱: 열기",
+        "classDiagram\n  class 문서",
+        "pie title 종류\n  \"마크다운\" : 3",
+    ]
+    for source in sources:
+        html = render_body(f"앞\n\n```mermaid\n{source}\n```\n")
+        assert '<pre class="mermaid" data-line="2">' in html
+        assert 'class="language-mermaid"' not in html
 
 
-def test_other_mermaid_diagrams_remain_code_blocks():
-    html = render_body("```mermaid\nflowchart LR\n  A --> B\n```\n")
-    assert 'class="language-mermaid"' in html
-    assert '<pre class="mermaid"' not in html
+def test_mermaid_source_is_html_escaped():
+    html = render_body("```mermaid\nsequenceDiagram\n  A->>B: <script>alert(1)</script>\n```\n")
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "<script>alert(1)</script>" not in html
 
 
 def test_mermaid_page_uses_bundled_library():
@@ -69,7 +75,7 @@ def test_print_document_breaks_page_per_file():
 
 
 def test_print_document_waits_for_mermaid_rendering():
-    html = print_document([("flow.md", "```mermaid\nflowchart TB\nA --> B\n```", None)])
+    html = print_document([("sequence.md", "```mermaid\nsequenceDiagram\nA->>B: 요청\n```", None)])
     assert "window.__mdMermaidReady = false" in html
     assert "await mermaid.run" in html
     assert MERMAID_JS.resolve().as_uri() in html

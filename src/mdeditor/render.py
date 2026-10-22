@@ -19,7 +19,6 @@ from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
 _URL_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
-_MERMAID_FLOWCHART_TB = re.compile(r"^\s*flowchart\s+TB(?:\s|$)", re.IGNORECASE)
 MERMAID_JS = Path(__file__).with_name("vendor") / "mermaid.tiny.js"
 
 
@@ -60,10 +59,10 @@ def render_body(text: str, base_dir: Path | None = None) -> str:
     for tok in tokens:
         if tok.map and tok.nesting >= 0 and tok.block:
             tok.attrSet("data-line", str(tok.map[0]))
-        # 기능 요청 #15: Mermaid 전체가 아니라 flowchart TB 코드 블록만 그래프로 표시한다.
-        # html.escape로 원문을 넣어 Mermaid가 처리하기 전에도 임의 HTML이 실행되지 않게 한다.
+        # 모든 Mermaid 코드 블록을 내장 엔진으로 보낸다. html.escape로 원문을 넣어
+        # Mermaid가 처리하기 전에도 임의 HTML이 실행되지 않게 한다.
         info = tok.info.strip().split(None, 1) if tok.type == "fence" else []
-        if info and info[0].lower() == "mermaid" and _MERMAID_FLOWCHART_TB.match(tok.content):
+        if info and info[0].lower() == "mermaid":
             line = tok.attrGet("data-line")
             line_attr = f' data-line="{line}"' if line is not None else ""
             tok.type = "html_block"
