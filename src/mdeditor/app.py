@@ -135,8 +135,18 @@ const blocks = () => Array.from(document.querySelectorAll('#content [data-line]'
 let totalLines = 1;  // 원본 줄 수(줄 표시가 없는 보기에서 비율 스크롤에 씀)
 function setContent(html, lines, changed) {
   hush(); totalLines = lines || 1; document.getElementById('content').innerHTML = html; buildToc(); markChanged(changed || []);
+  renderMermaid();
   if (slidesOn()) { slides = contentImages(); if (slides.length) showSlide(Math.min(si, slides.length - 1)); else closeSlides(); }
   guideH = -1; drawGuide();
+}
+let mermaidRound = 0;
+async function renderMermaid() {
+  const round = ++mermaidRound;
+  const nodes = document.querySelectorAll('#content .mermaid');
+  if (!nodes.length || typeof mermaid === 'undefined') return;
+  try { await mermaid.run({nodes: nodes, suppressErrors: true}); }
+  catch (e) { console.error(e); }
+  if (round === mermaidRound) { guideH = -1; drawGuide(); }
 }
 // A4 쪽 선: 인쇄는 쪽마다 A4 높이 − 위아래 여백(297 − 30 = 267mm)씩 담는다. 인쇄처럼 맨 위에 파일 이름 줄도 넣는다.
 // 그림·표 줄은 쪽 사이에서 잘리지 않고 다음 쪽으로 넘어가므로 실제 쪽 나눔은 선보다 조금 앞설 수 있다.
@@ -787,7 +797,10 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self._build_find_bar()
         self._build_status()
-        self.preview.setHtml(page("<div id='content'></div>", script=PREVIEW_JS), QUrl.fromLocalFile(str(Path.home()) + "/"))
+        self.preview.setHtml(
+            page("<div id='content'></div>", script=PREVIEW_JS, with_mermaid=True),
+            QUrl.fromLocalFile(str(Path.home()) + "/"),
+        )
         self._restore()
         self.editor.setVisible(self.source_action.isChecked())  # 소스 켬/끔 상태 복원
         self.new_file()
@@ -2239,7 +2252,27 @@ class MainWindow(QMainWindow):
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(html)
         view.setProperty("tmpfile", tmp)
-        view.loadFinished.connect(lambda ok: on_loaded(view, ok))
+        def loaded(ok: bool) -> None:
+            if not ok:
+                on_loaded(view, False)
+                return
+            attempts = 0
+
+            def wait_for_mermaid() -> None:
+                nonlocal attempts
+                attempts += 1
+
+                def checked(ready) -> None:
+                    if ready is True or attempts >= 200:  # 최대 10초 뒤에는 인쇄를 계속한다
+                        on_loaded(view, True)
+                    else:
+                        QTimer.singleShot(50, wait_for_mermaid)
+
+                view.page().runJavaScript("window.__mdMermaidReady !== false", checked)
+
+            wait_for_mermaid()
+
+        view.loadFinished.connect(loaded)
         view.load(QUrl.fromLocalFile(tmp))
         return view
 

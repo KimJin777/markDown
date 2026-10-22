@@ -19,6 +19,8 @@ from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
 _URL_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
+_MERMAID_FLOWCHART_TB = re.compile(r"^\s*flowchart\s+TB(?:\s|$)", re.IGNORECASE)
+MERMAID_JS = Path(__file__).with_name("vendor") / "mermaid.tiny.js"
 
 
 def _highlight(code: str, lang: str, _attrs: str) -> str:
@@ -58,6 +60,16 @@ def render_body(text: str, base_dir: Path | None = None) -> str:
     for tok in tokens:
         if tok.map and tok.nesting >= 0 and tok.block:
             tok.attrSet("data-line", str(tok.map[0]))
+        # 기능 요청 #15: Mermaid 전체가 아니라 flowchart TB 코드 블록만 그래프로 표시한다.
+        # html.escape로 원문을 넣어 Mermaid가 처리하기 전에도 임의 HTML이 실행되지 않게 한다.
+        info = tok.info.strip().split(None, 1) if tok.type == "fence" else []
+        if info and info[0].lower() == "mermaid" and _MERMAID_FLOWCHART_TB.match(tok.content):
+            line = tok.attrGet("data-line")
+            line_attr = f' data-line="{line}"' if line is not None else ""
+            tok.type = "html_block"
+            tok.tag = ""
+            tok.nesting = 0
+            tok.content = f'<pre class="mermaid"{line_attr}>{html.escape(tok.content)}</pre>\n'
         for child in tok.children or []:
             if child.type == "image":
                 child.attrSet("src", _absolute(str(child.attrGet("src") or ""), base_dir))
@@ -79,6 +91,8 @@ code { font-family: Consolas, "D2Coding", monospace; font-size: 90%;
        background: #eff1f3; padding: .15em .35em; border-radius: 4px; }
 pre { background: #f6f8fa; padding: 12px 16px; border-radius: 6px; overflow-x: auto; line-height: 1.45; }
 pre code { background: none; padding: 0; font-size: 88%; }
+pre.mermaid { background: #fff; padding: 12px 0; text-align: center; white-space: normal; }
+pre.mermaid svg { display: block; max-width: 100%; height: auto; margin: 0 auto; }
 blockquote { color: #59636e; border-left: 4px solid #d1d9e0; padding: 0 1em; margin-left: 0; }
 table { border-collapse: collapse; }
 th, td { border: 1px solid #d1d9e0; padding: 6px 13px; }
@@ -89,7 +103,8 @@ li.task-list-item { list-style: none; }
 li.task-list-item input { margin: 0 .4em 0 -1.3em; }
 .file-title { font-size: 12px; color: #59636e; border-bottom: 1px solid #d8dee4; margin-bottom: 1em; }
 .doc + .doc { break-before: page; page-break-before: always; }
-@media print { body { padding: 0; } pre { white-space: pre-wrap; } a { color: inherit; } }
+@media print { body { padding: 0; } pre { white-space: pre-wrap; } pre.mermaid { break-inside: avoid; }
+               a { color: inherit; } }
 """ + HtmlFormatter(style="default").get_style_defs("pre code")
 
 
@@ -293,10 +308,21 @@ def render_any(text: str, base_dir: Path | None, kind: str = "md") -> str:
     return render_body(text, base_dir)
 
 
-def page(body: str, title: str = "", script: str = "") -> str:
+def _mermaid_head() -> str:
+    """앱에 함께 넣은 Mermaid를 불러온다. 외부 CDN을 쓰지 않아 오프라인에서도 동작한다."""
+    src = html.escape(MERMAID_JS.resolve().as_uri(), quote=True)
+    return (
+        f"<script src='{src}'></script>"
+        "<script>mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:'default',"
+        "flowchart:{useMaxWidth:true}});</script>"
+    )
+
+
+def page(body: str, title: str = "", script: str = "", with_mermaid: bool = False) -> str:
+    extra_head = _mermaid_head() if with_mermaid else ""
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
-        f"<title>{html.escape(title)}</title><style>{CSS}</style></head>"
+        f"<title>{html.escape(title)}</title><style>{CSS}</style>{extra_head}</head>"
         f"<body>{body}{script}</body></html>"
     )
 
@@ -308,4 +334,18 @@ def print_document(docs: list[tuple]) -> str:
         f"{render_any(d[1], d[2], d[3] if len(d) > 3 else 'md')}</section>"
         for d in docs
     ]
-    return page("".join(parts), title="인쇄")
+    body = "".join(parts)
+    has_mermaid = 'class="mermaid"' in body
+    script = ""
+    if has_mermaid:
+        script = """
+<script>
+window.__mdMermaidReady = false;
+(async () => {
+  try { await mermaid.run({querySelector: '.mermaid', suppressErrors: true}); }
+  catch (e) { console.error(e); }
+  finally { window.__mdMermaidReady = true; }
+})();
+</script>
+"""
+    return page(body, title="인쇄", script=script, with_mermaid=has_mermaid)
